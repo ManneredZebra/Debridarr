@@ -4,7 +4,24 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 echo Building executable...
-pyinstaller --onefile --console --add-data "config.json;." --add-data "content;content" --add-data "logs;logs" scripts\app.py --name Debridarr
+pyinstaller --onefile --console scripts\app.py --name Debridarr
 
-echo Setup complete! Run Debridarr.exe to start the application.
+echo Creating user data folders...
+set DEBRIDARR_DIR=%LOCALAPPDATA%\Debridarr
+mkdir "%DEBRIDARR_DIR%" 2>nul
+mkdir "%DEBRIDARR_DIR%\logs" 2>nul
+mkdir "%DEBRIDARR_DIR%\content" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr_magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr_magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr_completed" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr_completed" 2>nul
+
+echo Creating config file...
+echo { > "%DEBRIDARR_DIR%\config.json"
+echo   "real_debrid_api_token": "YOUR_API_TOKEN_HERE" >> "%DEBRIDARR_DIR%\config.json"
+echo } >> "%DEBRIDARR_DIR%\config.json"
+
+echo Setup complete! Please edit %LOCALAPPDATA%\Debridarr\config.json with your Real Debrid API token.
+echo Starting Debridarr...
+start dist\Debridarr.exe
 pause

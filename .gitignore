@@ -6,12 +6,6 @@ __pycache__/
 *.so
 .coverage
 .pytest_cache/
-content/sonarr_magnets/*.magnet
-content/radarr_magnets/*.magnet
-content/sonarr_completed/*
-content/radarr_completed/*
-logs/*.log
 build/
 dist/
 *.spec
-Debridarr.exe

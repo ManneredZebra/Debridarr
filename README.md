@@ -20,7 +20,8 @@ A lightweight Windows application that monitors folders for magnet links from So
 
 ### 2. Configuration
 
-1. Add your Real Debrid API token in config.json:
+After running setup.bat, edit your Real Debrid API token in:
+`%LOCALAPPDATA%\Debridarr\config.json`
 
 ```json
 {
@@ -47,8 +48,8 @@ uninstall.bat
 
 ## Usage
 
-1. Configure Sonarr to save magnet links as `.magnet` files in the `content/sonarr_magnets` folder
-2. Configure Radarr to save magnet links as `.magnet` files in the `content/radarr_magnets` folder
+1. Configure Sonarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\sonarr_magnets`
+2. Configure Radarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\radarr_magnets`
 3. The application will automatically process new magnet files and download content to the respective completed folders
 
 ## Folder Structure
@@ -58,21 +59,13 @@ Debridarr/
 ├── scripts/
 │   └── app.py           # Main application
 ├── requirements.txt     # Python dependencies
-├── config.json          # Your configuration
 ├── setup.bat            # Setup script
-├── uninstall.bat        # Uninstall script
-├── Debridarr.exe        # Executable (created by setup)
-├── logs/                # Application logs
-└── content/
-    ├── sonarr_magnets/  # Input folder for TV show magnets
-    ├── radarr_magnets/  # Input folder for movie magnets
-    ├── sonarr_completed/ # Output folder for TV shows
-    └── radarr_completed/ # Output folder for movies
+└── uninstall.bat        # Uninstall script
 ```
 
 ## Logs
 
-Logs are displayed in the console window and saved to `logs/debridarr.log`.
+Logs are displayed in the console window and saved to `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`.
 
 ## Troubleshooting
 

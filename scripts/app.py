@@ -124,10 +124,8 @@ class MagnetHandler(FileSystemEventHandler):
         requests.delete(url, headers=headers)
 
 def main():
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.dirname(__file__))
+    # Use LOCALAPPDATA for all user data
+    base_dir = os.path.join(os.environ['LOCALAPPDATA'], 'Debridarr')
     
     # Setup logging
     logs_dir = os.path.join(base_dir, 'logs')
@@ -148,7 +146,7 @@ def main():
         with open(config_path, 'r') as f:
             config = json.load(f)
     except FileNotFoundError:
-        logging.error("config.json not found. Please ensure it exists in the application directory.")
+        logging.error("config.json not found. Please run setup.bat first.")
         input("Press Enter to exit...")
         return
     except json.JSONDecodeError:
