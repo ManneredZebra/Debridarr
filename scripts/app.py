@@ -165,14 +165,21 @@ class MagnetHandler(FileSystemEventHandler):
             if not filename:
                 filename = 'download'
             
-            os.makedirs(self.completed_folder, exist_ok=True)
-            output_path = os.path.join(self.completed_folder, filename)
+            # Download to in_progress folder first
+            in_progress_folder = os.path.join(os.path.dirname(self.completed_folder), 'in_progress')
+            os.makedirs(in_progress_folder, exist_ok=True)
+            temp_path = os.path.join(in_progress_folder, filename)
             
-            with open(output_path, 'wb') as f:
+            with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
-            logging.info(f"Downloaded: {output_path}")
+            # Move to completed folder after download finishes
+            os.makedirs(self.completed_folder, exist_ok=True)
+            final_path = os.path.join(self.completed_folder, filename)
+            os.rename(temp_path, final_path)
+            
+            logging.info(f"Downloaded: {final_path}")
         except requests.RequestException as e:
             logging.error(f"Download failed: {e}")
         except IOError as e:
@@ -245,12 +252,15 @@ def main():
     radarr_completed_magnets = os.path.join(radarr_dir, 'completed_magnets')
     radarr_completed = os.path.join(radarr_dir, 'completed_downloads')
     
+    in_progress_dir = os.path.join(content_dir, 'in_progress')
+    
     os.makedirs(sonarr_magnets, exist_ok=True)
     os.makedirs(sonarr_completed_magnets, exist_ok=True)
     os.makedirs(sonarr_completed, exist_ok=True)
     os.makedirs(radarr_magnets, exist_ok=True)
     os.makedirs(radarr_completed_magnets, exist_ok=True)
     os.makedirs(radarr_completed, exist_ok=True)
+    os.makedirs(in_progress_dir, exist_ok=True)
     
     # Create handlers
     sonarr_handler = MagnetHandler(config_path, sonarr_completed, sonarr_magnets, sonarr_completed_magnets)

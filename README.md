@@ -48,9 +48,31 @@ uninstall.bat
 
 ## Usage
 
-1. Configure Sonarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\sonarr\magnets`
-2. Configure Radarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\radarr\magnets`
-3. The application will automatically process new magnet files and download content to the respective completed folders
+### Configure Sonarr
+
+1. Go to Settings > Download Clients
+2. Add a new Download Client with type "Torrent Blackhole"
+3. Set the following settings:
+   - **Torrent Folder**: `%LOCALAPPDATA%\Debridarr\content\sonarr\magnets`
+   - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\sonarr\completed_downloads`
+   - **Save Magnet Links**: ✓ (checked)
+   - **Magnet File Extension**: `.magnet`
+
+### Configure Radarr
+
+1. Go to Settings > Download Clients
+2. Add a new Download Client with type "Torrent Blackhole"
+3. Set the following settings:
+   - **Torrent Folder**: `%LOCALAPPDATA%\Debridarr\content\radarr\magnets`
+   - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\radarr\completed_downloads`
+   - **Save Magnet Links**: ✓ (checked)
+   - **Magnet File Extension**: `.magnet`
+
+### How it Works
+
+1. Sonarr/Radarr saves magnet links as `.magnet` files in their respective magnet folders
+2. Debridarr automatically processes new magnet files through Real Debrid
+3. Downloaded content appears in the completed_downloads folders for Sonarr/Radarr to import
 
 ## Folder Structure
 
@@ -71,6 +93,7 @@ Logs are displayed in the console window and saved to `%LOCALAPPDATA%\Debridarr\
 
 - Ensure your Real Debrid API token is valid
 - Check that magnet files contain valid magnet links
-- Monitor logs in the console window
+- Monitor logs at `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`
 - Verify folder permissions for the application
 - Run setup.bat as Administrator if needed
+- Ensure Sonarr/Radarr can access the configured folder paths
