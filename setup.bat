@@ -11,11 +11,12 @@ set DEBRIDARR_DIR=%LOCALAPPDATA%\Debridarr
 mkdir "%DEBRIDARR_DIR%" 2>nul
 mkdir "%DEBRIDARR_DIR%\logs" 2>nul
 mkdir "%DEBRIDARR_DIR%\content" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\sonarr_magnets" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\radarr_magnets" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\sonarr_completed" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\radarr_completed" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\completed_magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr\magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr\completed_magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr\completed_downloads" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr\magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr\completed_magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr\completed_downloads" 2>nul
 
 echo Creating config file...
 echo { > "%DEBRIDARR_DIR%\config.json"

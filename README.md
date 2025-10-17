@@ -48,8 +48,8 @@ uninstall.bat
 
 ## Usage
 
-1. Configure Sonarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\sonarr_magnets`
-2. Configure Radarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\radarr_magnets`
+1. Configure Sonarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\sonarr\magnets`
+2. Configure Radarr to save magnet links as `.magnet` files in `%LOCALAPPDATA%\Debridarr\content\radarr\magnets`
 3. The application will automatically process new magnet files and download content to the respective completed folders
 
 ## Folder Structure

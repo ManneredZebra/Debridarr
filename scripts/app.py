@@ -10,11 +10,11 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config, completed_folder, magnets_folder):
-        self.config = config
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder):
+        self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
-        self.api_token = config['real_debrid_api_token'].strip()
+        self.completed_magnets_folder = completed_magnets_folder
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -39,23 +39,23 @@ class MagnetHandler(FileSystemEventHandler):
             
             self.select_files(torrent_id)
             
-            download_link = self.wait_for_torrent(torrent_id)
-            if not download_link:
+            result = self.wait_for_torrent(torrent_id)
+            if not result:
                 return
             
-            self.download_file(download_link)
+            download_link, filename = result
+            self.download_file(download_link, filename)
             
             self.delete_torrent(torrent_id)
             
             # Move magnet file to completed folder
-            completed_magnets = os.path.join(os.path.dirname(self.magnets_folder), 'completed_magnets')
-            os.makedirs(completed_magnets, exist_ok=True)
+            os.makedirs(self.completed_magnets_folder, exist_ok=True)
             filename = os.path.basename(file_path)
             
             # Try multiple times to move the file
             for attempt in range(3):
                 try:
-                    os.rename(file_path, os.path.join(completed_magnets, filename))
+                    os.rename(file_path, os.path.join(self.completed_magnets_folder, filename))
                     logging.info(f"Moved magnet file to completed: {filename}")
                     break
                 except PermissionError:
@@ -69,34 +69,59 @@ class MagnetHandler(FileSystemEventHandler):
         except Exception as e:
             logging.error(f"Error processing {file_path}: {e}")
     
+    def get_api_token(self):
+        try:
+            with open(self.config_path, 'r') as f:
+                config = json.load(f)
+            return config['real_debrid_api_token'].strip().strip('"').strip("'")
+        except Exception as e:
+            logging.error(f"Error reading config: {e}")
+            return None
+    
     def add_torrent(self, magnet_link):
         try:
+            api_token = self.get_api_token()
+            if not api_token:
+                return None
+                
             url = "https://api.real-debrid.com/rest/1.0/torrents/addMagnet"
-            headers = {"Authorization": f"Bearer {self.api_token}"}
+            headers = {
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
             data = {"magnet": magnet_link}
             
             response = requests.post(url, headers=headers, data=data, timeout=30)
+            
             if response.status_code == 201:
                 torrent_id = response.json()['id']
                 logging.info(f"Torrent added: {torrent_id}")
                 return torrent_id
             
-            logging.error(f"Failed to add torrent: {response.text}")
+            logging.error(f"Failed to add torrent (status {response.status_code}): {response.text}")
             return None
         except requests.RequestException as e:
             logging.error(f"Network error adding torrent: {e}")
             return None
     
     def select_files(self, torrent_id):
+        api_token = self.get_api_token()
+        if not api_token:
+            return
+            
         url = f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
+        headers = {"Authorization": f"Bearer {api_token}"}
         data = {"files": "all"}
         
         requests.post(url, headers=headers, data=data)
     
     def wait_for_torrent(self, torrent_id):
+        api_token = self.get_api_token()
+        if not api_token:
+            return None
+            
         url = f"https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
+        headers = {"Authorization": f"Bearer {api_token}"}
         
         for _ in range(60):
             response = requests.get(url, headers=headers)
@@ -104,15 +129,19 @@ class MagnetHandler(FileSystemEventHandler):
                 data = response.json()
                 if data['status'] == 'downloaded':
                     link = data['links'][0]
-                    return self.unrestrict_link(link)
+                    return self.unrestrict_link(link), data.get('filename', 'unknown')
             time.sleep(10)
         
         logging.error(f"Torrent {torrent_id} not ready after 10 minutes")
         return None
     
     def unrestrict_link(self, link):
+        api_token = self.get_api_token()
+        if not api_token:
+            return None
+            
         url = "https://api.real-debrid.com/rest/1.0/unrestrict/link"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
+        headers = {"Authorization": f"Bearer {api_token}"}
         data = {"link": link}
         
         response = requests.post(url, headers=headers, data=data)
@@ -120,14 +149,21 @@ class MagnetHandler(FileSystemEventHandler):
             return response.json()['download']
         return None
     
-    def download_file(self, download_url):
+    def download_file(self, download_url, rd_filename=None):
         try:
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            filename = response.headers.get('content-disposition', '').split('filename=')[-1].strip('"')
+            # Use Real Debrid filename first, then content-disposition, then URL
+            filename = rd_filename
+            if not filename:
+                cd_header = response.headers.get('content-disposition', '')
+                if 'filename=' in cd_header:
+                    filename = cd_header.split('filename=')[-1].strip('"').strip("'")
             if not filename:
                 filename = download_url.split('/')[-1]
+            if not filename:
+                filename = 'download'
             
             os.makedirs(self.completed_folder, exist_ok=True)
             output_path = os.path.join(self.completed_folder, filename)
@@ -143,8 +179,12 @@ class MagnetHandler(FileSystemEventHandler):
             logging.error(f"File write error: {e}")
     
     def delete_torrent(self, torrent_id):
+        api_token = self.get_api_token()
+        if not api_token:
+            return
+            
         url = f"https://api.real-debrid.com/rest/1.0/torrents/delete/{torrent_id}"
-        headers = {"Authorization": f"Bearer {self.api_token}"}
+        headers = {"Authorization": f"Bearer {api_token}"}
         requests.delete(url, headers=headers)
 
 def process_existing_magnets(magnets_folder, handler):
@@ -192,23 +232,29 @@ def main():
         logging.error("Invalid JSON in config.json. Please check the file format.")
         return
     
-    # Define fixed folder paths
+    # Define organized folder paths
     content_dir = os.path.join(base_dir, 'content')
-    sonarr_magnets = os.path.join(content_dir, 'sonarr_magnets')
-    sonarr_completed = os.path.join(content_dir, 'sonarr_completed')
-    radarr_magnets = os.path.join(content_dir, 'radarr_magnets')
-    radarr_completed = os.path.join(content_dir, 'radarr_completed')
     
-    os.makedirs(content_dir, exist_ok=True)
+    sonarr_dir = os.path.join(content_dir, 'sonarr')
+    sonarr_magnets = os.path.join(sonarr_dir, 'magnets')
+    sonarr_completed_magnets = os.path.join(sonarr_dir, 'completed_magnets')
+    sonarr_completed = os.path.join(sonarr_dir, 'completed_downloads')
+    
+    radarr_dir = os.path.join(content_dir, 'radarr')
+    radarr_magnets = os.path.join(radarr_dir, 'magnets')
+    radarr_completed_magnets = os.path.join(radarr_dir, 'completed_magnets')
+    radarr_completed = os.path.join(radarr_dir, 'completed_downloads')
     
     os.makedirs(sonarr_magnets, exist_ok=True)
+    os.makedirs(sonarr_completed_magnets, exist_ok=True)
     os.makedirs(sonarr_completed, exist_ok=True)
     os.makedirs(radarr_magnets, exist_ok=True)
+    os.makedirs(radarr_completed_magnets, exist_ok=True)
     os.makedirs(radarr_completed, exist_ok=True)
     
     # Create handlers
-    sonarr_handler = MagnetHandler(config, sonarr_completed, sonarr_magnets)
-    radarr_handler = MagnetHandler(config, radarr_completed, radarr_magnets)
+    sonarr_handler = MagnetHandler(config_path, sonarr_completed, sonarr_magnets, sonarr_completed_magnets)
+    radarr_handler = MagnetHandler(config_path, radarr_completed, radarr_magnets, radarr_completed_magnets)
     
     # Process existing magnet files
     process_existing_magnets(sonarr_magnets, sonarr_handler)
