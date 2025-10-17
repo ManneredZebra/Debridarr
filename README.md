@@ -40,6 +40,11 @@ setup.bat
 Debridarr.exe
 ```
 
+3. To uninstall:
+```cmd
+uninstall.bat
+```
+
 ## Usage
 
 1. Configure Sonarr to save magnet links as `.magnet` files in the `content/sonarr_magnets` folder
@@ -55,7 +60,9 @@ Debridarr/
 ├── requirements.txt     # Python dependencies
 ├── config.json          # Your configuration
 ├── setup.bat            # Setup script
+├── uninstall.bat        # Uninstall script
 ├── Debridarr.exe        # Executable (created by setup)
+├── logs/                # Application logs
 └── content/
     ├── sonarr_magnets/  # Input folder for TV show magnets
     ├── radarr_magnets/  # Input folder for movie magnets
@@ -65,7 +72,7 @@ Debridarr/
 
 ## Logs
 
-Logs are displayed in the console window when running the application.
+Logs are displayed in the console window and saved to `logs/debridarr.log`.
 
 ## Troubleshooting
 
