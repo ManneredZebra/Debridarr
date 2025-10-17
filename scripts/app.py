@@ -16,7 +16,9 @@ class MagnetHandler(FileSystemEventHandler):
         self.api_token = config['real_debrid_api_token']
         
     def on_created(self, event):
-        if event.is_dir or not event.src_path.endswith('.magnet'):
+        if hasattr(event, 'is_directory') and event.is_directory:
+            return
+        if not event.src_path.endswith('.magnet'):
             return
         
         logging.info(f"New magnet file detected: {event.src_path}")
@@ -136,8 +138,7 @@ def main():
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
+            logging.FileHandler(log_file)
         ]
     )
     
@@ -147,11 +148,9 @@ def main():
             config = json.load(f)
     except FileNotFoundError:
         logging.error("config.json not found. Please run setup.bat first.")
-        input("Press Enter to exit...")
         return
     except json.JSONDecodeError:
         logging.error("Invalid JSON in config.json. Please check the file format.")
-        input("Press Enter to exit...")
         return
     
     # Define fixed folder paths
@@ -182,7 +181,6 @@ def main():
         logging.info("Shutting down...")
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
-        input("Press Enter to exit...")
     finally:
         observer.stop()
         observer.join()
