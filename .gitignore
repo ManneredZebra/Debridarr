@@ -1,0 +1,17 @@
+config.json
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.coverage
+.pytest_cache/
+content/sonarr_magnets/*.magnet
+content/radarr_magnets/*.magnet
+content/sonarr_completed/*
+content/radarr_completed/*
+build/
+dist/
+*.spec
+Debridarr.exe
