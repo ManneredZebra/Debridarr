@@ -57,6 +57,7 @@ uninstall.bat
    - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\sonarr\completed_downloads`
    - **Save Magnet Links**: ✓ (checked)
    - **Magnet File Extension**: `.magnet`
+   - **Read Only**: ☐ (unchecked)
 
 ### Configure Radarr
 
@@ -67,6 +68,7 @@ uninstall.bat
    - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\radarr\completed_downloads`
    - **Save Magnet Links**: ✓ (checked)
    - **Magnet File Extension**: `.magnet`
+   - **Read Only**: ☐ (unchecked)
 
 ### How it Works
 

@@ -5,9 +5,11 @@ import time
 import logging
 import requests
 import sys
+import threading
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from concurrent.futures import ThreadPoolExecutor
 
 class MagnetHandler(FileSystemEventHandler):
     def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder):
@@ -15,6 +17,8 @@ class MagnetHandler(FileSystemEventHandler):
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
         self.completed_magnets_folder = completed_magnets_folder
+        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.processing_files = set()
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -22,13 +26,33 @@ class MagnetHandler(FileSystemEventHandler):
         if not event.src_path.endswith('.magnet'):
             return
         
+        if event.src_path in self.processing_files:
+            logging.debug(f"Already processing: {event.src_path}")
+            return
+            
+        if len(self.processing_files) >= 3:
+            logging.info(f"Maximum concurrent downloads reached (3), queuing: {event.src_path}")
+            return
+            
         logging.info(f"New magnet file detected: {event.src_path}")
-        self.process_magnet(event.src_path)
+        self.processing_files.add(event.src_path)
+        self.executor.submit(self._process_magnet_wrapper, event.src_path)
+    
+    def _process_magnet_wrapper(self, file_path):
+        try:
+            self.process_magnet(file_path)
+        finally:
+            self.processing_files.discard(file_path)
     
     def process_magnet(self, file_path):
         try:
-            # Wait a moment for file to be fully written
-            time.sleep(1)
+            # Wait for file to be fully written and stable
+            time.sleep(3)
+            
+            # Check if file still exists (might have been processed by another thread)
+            if not os.path.exists(file_path):
+                logging.info(f"File no longer exists, skipping: {file_path}")
+                return
             
             with open(file_path, 'r') as f:
                 magnet_link = f.read().strip()
@@ -53,16 +77,21 @@ class MagnetHandler(FileSystemEventHandler):
             filename = os.path.basename(file_path)
             
             # Try multiple times to move the file
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
+                    # Check if file still exists before moving
+                    if not os.path.exists(file_path):
+                        logging.info(f"Magnet file already processed: {filename}")
+                        break
                     os.rename(file_path, os.path.join(self.completed_magnets_folder, filename))
                     logging.info(f"Moved magnet file to completed: {filename}")
                     break
-                except PermissionError:
-                    if attempt < 2:
+                except (OSError, IOError) as e:
+                    if attempt < 4:
+                        logging.warning(f"Magnet move attempt {attempt + 1} failed, retrying in 2 seconds: {e}")
                         time.sleep(2)
                     else:
-                        logging.error(f"Failed to move magnet file after 3 attempts: {filename}")
+                        logging.error(f"Failed to move magnet file after 5 attempts: {filename}")
             
         except PermissionError as e:
             logging.error(f"Permission denied accessing {file_path}: {e}")
@@ -82,6 +111,7 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             api_token = self.get_api_token()
             if not api_token:
+                logging.error("No API token available")
                 return None
                 
             url = "https://api.real-debrid.com/rest/1.0/torrents/addMagnet"
@@ -91,11 +121,12 @@ class MagnetHandler(FileSystemEventHandler):
             }
             data = {"magnet": magnet_link}
             
+            logging.debug(f"Adding torrent to Real Debrid...")
             response = requests.post(url, headers=headers, data=data, timeout=30)
             
             if response.status_code == 201:
                 torrent_id = response.json()['id']
-                logging.info(f"Torrent added: {torrent_id}")
+                logging.info(f"Torrent added successfully: {torrent_id}")
                 return torrent_id
             
             logging.error(f"Failed to add torrent (status {response.status_code}): {response.text}")
@@ -107,27 +138,42 @@ class MagnetHandler(FileSystemEventHandler):
     def select_files(self, torrent_id):
         api_token = self.get_api_token()
         if not api_token:
+            logging.error("No API token available for file selection")
             return
             
         url = f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
         data = {"files": "all"}
         
-        requests.post(url, headers=headers, data=data)
+        logging.debug(f"Selecting all files for torrent: {torrent_id}")
+        response = requests.post(url, headers=headers, data=data)
+        if response.status_code == 204:
+            logging.info(f"Files selected for torrent: {torrent_id}")
+        else:
+            logging.warning(f"File selection response: {response.status_code}")
     
     def wait_for_torrent(self, torrent_id):
         api_token = self.get_api_token()
         if not api_token:
+            logging.error("No API token available for torrent status check")
             return None
             
         url = f"https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
         
-        for _ in range(60):
+        logging.info(f"Waiting for torrent to complete: {torrent_id}")
+        for attempt in range(60):
             response = requests.get(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
-                if data['status'] == 'downloaded':
+                status = data.get('status', 'unknown')
+                progress = data.get('progress', 0)
+                
+                if attempt % 6 == 0:  # Log every minute
+                    logging.info(f"Torrent {torrent_id} status: {status}, progress: {progress}%")
+                
+                if status == 'downloaded':
+                    logging.info(f"Torrent {torrent_id} completed successfully")
                     link = data['links'][0]
                     return self.unrestrict_link(link), data.get('filename', 'unknown')
             time.sleep(10)
@@ -151,6 +197,7 @@ class MagnetHandler(FileSystemEventHandler):
     
     def download_file(self, download_url, rd_filename=None):
         try:
+            logging.info(f"Starting download from: {download_url}")
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
@@ -170,16 +217,38 @@ class MagnetHandler(FileSystemEventHandler):
             os.makedirs(in_progress_folder, exist_ok=True)
             temp_path = os.path.join(in_progress_folder, filename)
             
+            logging.info(f"Downloading to temporary location: {temp_path}")
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0 and downloaded % (1024*1024*10) == 0:  # Log every 10MB
+                        progress = (downloaded / total_size) * 100
+                        logging.debug(f"Download progress: {progress:.1f}%")
             
-            # Move to completed folder after download finishes
+            # Ensure file is fully written before moving
+            time.sleep(2)
+            
+            # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
             final_path = os.path.join(self.completed_folder, filename)
-            os.rename(temp_path, final_path)
             
-            logging.info(f"Downloaded: {final_path}")
+            # Retry file move up to 5 times
+            for attempt in range(5):
+                try:
+                    os.rename(temp_path, final_path)
+                    logging.info(f"Download completed successfully: {final_path}")
+                    break
+                except (OSError, IOError) as e:
+                    if attempt < 4:
+                        logging.warning(f"File move attempt {attempt + 1} failed, retrying in 3 seconds: {e}")
+                        time.sleep(3)
+                    else:
+                        logging.error(f"Failed to move file after 5 attempts: {e}")
+                        raise
         except requests.RequestException as e:
             logging.error(f"Download failed: {e}")
         except IOError as e:
@@ -188,28 +257,48 @@ class MagnetHandler(FileSystemEventHandler):
     def delete_torrent(self, torrent_id):
         api_token = self.get_api_token()
         if not api_token:
+            logging.error("No API token available for torrent deletion")
             return
             
         url = f"https://api.real-debrid.com/rest/1.0/torrents/delete/{torrent_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
-        requests.delete(url, headers=headers)
+        
+        logging.debug(f"Deleting torrent from Real Debrid: {torrent_id}")
+        response = requests.delete(url, headers=headers)
+        if response.status_code == 204:
+            logging.info(f"Torrent deleted successfully: {torrent_id}")
+        else:
+            logging.warning(f"Torrent deletion response: {response.status_code}")
 
 def process_existing_magnets(magnets_folder, handler):
     """Process any existing magnet files in the folder"""
     try:
-        for filename in os.listdir(magnets_folder):
-            if filename.endswith('.magnet'):
-                file_path = os.path.join(magnets_folder, filename)
-                # Check if file is accessible
-                try:
-                    with open(file_path, 'r') as f:
-                        pass  # Just test if we can open it
-                    logging.info(f"Processing existing magnet: {file_path}")
-                    handler.process_magnet(file_path)
-                except PermissionError:
-                    logging.warning(f"Skipping locked file: {filename}")
+        magnet_files = [f for f in os.listdir(magnets_folder) if f.endswith('.magnet')]
+        if magnet_files:
+            logging.info(f"Found {len(magnet_files)} magnet files to process in {magnets_folder}")
+        
+        for filename in magnet_files:
+            file_path = os.path.join(magnets_folder, filename)
+            
+            if file_path in handler.processing_files:
+                logging.debug(f"Already processing: {filename}")
+                continue
+                
+            if len(handler.processing_files) >= 3:
+                logging.debug(f"Maximum concurrent downloads reached (3), skipping: {filename}")
+                break
+                
+            # Check if file is accessible
+            try:
+                with open(file_path, 'r') as f:
+                    pass  # Just test if we can open it
+                logging.info(f"Queuing existing magnet: {filename}")
+                handler.processing_files.add(file_path)
+                handler.executor.submit(handler._process_magnet_wrapper, file_path)
+            except PermissionError:
+                logging.warning(f"Skipping locked file: {filename}")
     except Exception as e:
-        logging.error(f"Error scanning magnet folder: {e}")
+        logging.error(f"Error scanning magnet folder {magnets_folder}: {e}")
 
 def main():
     # Use LOCALAPPDATA for all user data
