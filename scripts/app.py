@@ -27,6 +27,9 @@ class MagnetHandler(FileSystemEventHandler):
     
     def process_magnet(self, file_path):
         try:
+            # Wait a moment for file to be fully written
+            time.sleep(1)
+            
             with open(file_path, 'r') as f:
                 magnet_link = f.read().strip()
             
@@ -48,9 +51,21 @@ class MagnetHandler(FileSystemEventHandler):
             completed_magnets = os.path.join(os.path.dirname(self.magnets_folder), 'completed_magnets')
             os.makedirs(completed_magnets, exist_ok=True)
             filename = os.path.basename(file_path)
-            os.rename(file_path, os.path.join(completed_magnets, filename))
-            logging.info(f"Moved magnet file to completed: {filename}")
             
+            # Try multiple times to move the file
+            for attempt in range(3):
+                try:
+                    os.rename(file_path, os.path.join(completed_magnets, filename))
+                    logging.info(f"Moved magnet file to completed: {filename}")
+                    break
+                except PermissionError:
+                    if attempt < 2:
+                        time.sleep(2)
+                    else:
+                        logging.error(f"Failed to move magnet file after 3 attempts: {filename}")
+            
+        except PermissionError as e:
+            logging.error(f"Permission denied accessing {file_path}: {e}")
         except Exception as e:
             logging.error(f"Error processing {file_path}: {e}")
     
@@ -134,11 +149,20 @@ class MagnetHandler(FileSystemEventHandler):
 
 def process_existing_magnets(magnets_folder, handler):
     """Process any existing magnet files in the folder"""
-    for filename in os.listdir(magnets_folder):
-        if filename.endswith('.magnet'):
-            file_path = os.path.join(magnets_folder, filename)
-            logging.info(f"Processing existing magnet: {file_path}")
-            handler.process_magnet(file_path)
+    try:
+        for filename in os.listdir(magnets_folder):
+            if filename.endswith('.magnet'):
+                file_path = os.path.join(magnets_folder, filename)
+                # Check if file is accessible
+                try:
+                    with open(file_path, 'r') as f:
+                        pass  # Just test if we can open it
+                    logging.info(f"Processing existing magnet: {file_path}")
+                    handler.process_magnet(file_path)
+                except PermissionError:
+                    logging.warning(f"Skipping locked file: {filename}")
+    except Exception as e:
+        logging.error(f"Error scanning magnet folder: {e}")
 
 def main():
     # Use LOCALAPPDATA for all user data
