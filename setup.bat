@@ -15,6 +15,7 @@ mkdir "%DEBRIDARR_DIR%\content\sonarr_magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr_magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\sonarr_completed" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr_completed" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\completed_magnets" 2>nul
 
 echo Creating config file...
 echo { > "%DEBRIDARR_DIR%\config.json"

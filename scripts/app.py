@@ -10,10 +10,11 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config, completed_folder):
+    def __init__(self, config, completed_folder, magnets_folder):
         self.config = config
         self.completed_folder = completed_folder
-        self.api_token = config['real_debrid_api_token']
+        self.magnets_folder = magnets_folder
+        self.api_token = config['real_debrid_api_token'].strip()
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -42,7 +43,13 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_file(download_link)
             
             self.delete_torrent(torrent_id)
-            os.remove(file_path)
+            
+            # Move magnet file to completed folder
+            completed_magnets = os.path.join(os.path.dirname(self.magnets_folder), 'completed_magnets')
+            os.makedirs(completed_magnets, exist_ok=True)
+            filename = os.path.basename(file_path)
+            os.rename(file_path, os.path.join(completed_magnets, filename))
+            logging.info(f"Moved magnet file to completed: {filename}")
             
         except Exception as e:
             logging.error(f"Error processing {file_path}: {e}")
@@ -125,6 +132,14 @@ class MagnetHandler(FileSystemEventHandler):
         headers = {"Authorization": f"Bearer {self.api_token}"}
         requests.delete(url, headers=headers)
 
+def process_existing_magnets(magnets_folder, handler):
+    """Process any existing magnet files in the folder"""
+    for filename in os.listdir(magnets_folder):
+        if filename.endswith('.magnet'):
+            file_path = os.path.join(magnets_folder, filename)
+            logging.info(f"Processing existing magnet: {file_path}")
+            handler.process_magnet(file_path)
+
 def main():
     # Use LOCALAPPDATA for all user data
     base_dir = os.path.join(os.environ['LOCALAPPDATA'], 'Debridarr')
@@ -167,16 +182,27 @@ def main():
     os.makedirs(radarr_magnets, exist_ok=True)
     os.makedirs(radarr_completed, exist_ok=True)
     
+    # Create handlers
+    sonarr_handler = MagnetHandler(config, sonarr_completed, sonarr_magnets)
+    radarr_handler = MagnetHandler(config, radarr_completed, radarr_magnets)
+    
+    # Process existing magnet files
+    process_existing_magnets(sonarr_magnets, sonarr_handler)
+    process_existing_magnets(radarr_magnets, radarr_handler)
+    
     observer = Observer()
-    observer.schedule(MagnetHandler(config, sonarr_completed), sonarr_magnets, recursive=False)
-    observer.schedule(MagnetHandler(config, radarr_completed), radarr_magnets, recursive=False)
+    observer.schedule(sonarr_handler, sonarr_magnets, recursive=False)
+    observer.schedule(radarr_handler, radarr_magnets, recursive=False)
     
     try:
         observer.start()
         logging.info("Debridarr started - monitoring for magnet files")
         
         while True:
-            time.sleep(1)
+            time.sleep(30)
+            # Retry processing any remaining magnet files
+            process_existing_magnets(sonarr_magnets, sonarr_handler)
+            process_existing_magnets(radarr_magnets, radarr_handler)
     except KeyboardInterrupt:
         logging.info("Shutting down...")
     except Exception as e:
