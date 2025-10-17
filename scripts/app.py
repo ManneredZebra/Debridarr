@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import requests
+import sys
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -114,7 +115,11 @@ class MagnetHandler(FileSystemEventHandler):
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    base_dir = os.path.dirname(os.path.dirname(__file__))
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+    
     config_path = os.path.join(base_dir, 'config.json')
     with open(config_path, 'r') as f:
         config = json.load(f)
