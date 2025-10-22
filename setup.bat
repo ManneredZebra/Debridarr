@@ -1,10 +1,10 @@
 @echo off
 echo Installing Python dependencies...
-pip install -r requirements.txt
-pip install pyinstaller
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller
 
 echo Building executable...
-pip install --upgrade pip
 python -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr
 
 echo Creating user data folders...
