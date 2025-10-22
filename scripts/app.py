@@ -242,10 +242,20 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             logging.info(f"Starting download from: {download_url}")
             
-            # Skip non-video files
-            if rd_filename and not any(ext in rd_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
-                logging.info(f"Skipping non-video file: {rd_filename}")
-                return
+            # Get filename from URL if rd_filename is not a proper filename
+            if not rd_filename or not any(ext in rd_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                # Extract filename from URL
+                url_filename = download_url.split('/')[-1].split('?')[0]
+                if '%' in url_filename:
+                    import urllib.parse
+                    url_filename = urllib.parse.unquote(url_filename)
+                
+                # Use URL filename if it's a video file
+                if any(ext in url_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                    rd_filename = url_filename
+                else:
+                    logging.info(f"Skipping non-video file: {rd_filename or url_filename}")
+                    return
                 
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()

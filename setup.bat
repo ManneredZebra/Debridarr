@@ -1,12 +1,12 @@
 @echo off
 echo Installing Python dependencies...
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install pyinstaller
+py -m pip install --upgrade pip
+py -m pip install -r requirements.txt
+py -m pip install pyinstaller
 
 echo Building executable...
 cd /d "%~dp0"
-python -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr --distpath .
+py -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr --distpath .
 
 echo Creating user data folders...
 set DEBRIDARR_DIR=%LOCALAPPDATA%\Debridarr
