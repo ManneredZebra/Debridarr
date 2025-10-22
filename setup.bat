@@ -22,9 +22,14 @@ mkdir "%DEBRIDARR_DIR%\content\radarr\completed_downloads" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\in_progress" 2>nul
 
 echo Creating config file...
-echo { > "%DEBRIDARR_DIR%\config.json"
-echo   "real_debrid_api_token": "YOUR_API_TOKEN_HERE" >> "%DEBRIDARR_DIR%\config.json"
-echo } >> "%DEBRIDARR_DIR%\config.json"
+if not exist "%DEBRIDARR_DIR%\config.json" (
+    echo { > "%DEBRIDARR_DIR%\config.json"
+    echo   "real_debrid_api_token": "YOUR_API_TOKEN_HERE" >> "%DEBRIDARR_DIR%\config.json"
+    echo } >> "%DEBRIDARR_DIR%\config.json"
+    echo Config file created.
+) else (
+    echo Config file already exists, skipping.
+)
 
 echo Setup complete! Please edit %LOCALAPPDATA%\Debridarr\config.json with your Real Debrid API token.
 if exist Debridarr.exe (

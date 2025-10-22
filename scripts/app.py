@@ -10,6 +10,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
 
 class MagnetHandler(FileSystemEventHandler):
     def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder):
@@ -371,12 +372,13 @@ def main():
     os.makedirs(logs_dir, exist_ok=True)
     log_file = os.path.join(logs_dir, 'debridarr.log')
     
+    # Setup rotating log handler (100KB max, 3 backup files)
+    log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
+    log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file)
-        ]
+        handlers=[log_handler]
     )
     
     try:
