@@ -55,6 +55,14 @@ class MagnetHandler(FileSystemEventHandler):
                 logging.info(f"File no longer exists, skipping: {file_path}")
                 return
             
+            # Check if magnet already processed
+            filename = os.path.basename(file_path)
+            completed_magnet_path = os.path.join(self.completed_magnets_folder, filename)
+            if os.path.exists(completed_magnet_path):
+                logging.info(f"Magnet already processed, removing duplicate: {filename}")
+                os.remove(file_path)
+                return
+            
             with open(file_path, 'r') as f:
                 magnet_link = f.read().strip()
             
@@ -275,7 +283,7 @@ class MagnetHandler(FileSystemEventHandler):
             # Sanitize filename
             filename = self.sanitize_filename(filename)
             
-            # Download to in_progress folder first
+            # Download to in_progress folder first (within sonarr/radarr directory)
             in_progress_folder = os.path.join(os.path.dirname(self.completed_folder), 'in_progress')
             os.makedirs(in_progress_folder, exist_ok=True)
             temp_path = os.path.join(in_progress_folder, filename)
@@ -298,6 +306,12 @@ class MagnetHandler(FileSystemEventHandler):
             # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
             final_path = os.path.join(self.completed_folder, filename)
+            
+            # Check if file already exists in completed folder
+            if os.path.exists(final_path):
+                logging.info(f"File already exists in completed folder, removing from in_progress: {filename}")
+                os.remove(temp_path)
+                return
             
             # Retry file move up to 5 times
             for attempt in range(5):
@@ -405,15 +419,12 @@ def main():
     radarr_completed_magnets = os.path.join(radarr_dir, 'completed_magnets')
     radarr_completed = os.path.join(radarr_dir, 'completed_downloads')
     
-    in_progress_dir = os.path.join(content_dir, 'in_progress')
-    
     os.makedirs(sonarr_magnets, exist_ok=True)
     os.makedirs(sonarr_completed_magnets, exist_ok=True)
     os.makedirs(sonarr_completed, exist_ok=True)
     os.makedirs(radarr_magnets, exist_ok=True)
     os.makedirs(radarr_completed_magnets, exist_ok=True)
     os.makedirs(radarr_completed, exist_ok=True)
-    os.makedirs(in_progress_dir, exist_ok=True)
     
     # Create handlers
     sonarr_handler = MagnetHandler(config_path, sonarr_completed, sonarr_magnets, sonarr_completed_magnets)

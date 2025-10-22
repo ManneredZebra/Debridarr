@@ -19,7 +19,6 @@ mkdir "%DEBRIDARR_DIR%\content\sonarr\completed_downloads" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\completed_magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\completed_downloads" 2>nul
-mkdir "%DEBRIDARR_DIR%\content\in_progress" 2>nul
 
 echo Creating config file...
 if not exist "%DEBRIDARR_DIR%\config.json" (
