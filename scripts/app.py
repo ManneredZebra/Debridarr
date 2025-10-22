@@ -10,6 +10,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
 
 class MagnetHandler(FileSystemEventHandler):
     def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder):
@@ -54,6 +55,14 @@ class MagnetHandler(FileSystemEventHandler):
                 logging.info(f"File no longer exists, skipping: {file_path}")
                 return
             
+            # Check if magnet already processed
+            filename = os.path.basename(file_path)
+            completed_magnet_path = os.path.join(self.completed_magnets_folder, filename)
+            if os.path.exists(completed_magnet_path):
+                logging.info(f"Magnet already processed, removing duplicate: {filename}")
+                os.remove(file_path)
+                return
+            
             with open(file_path, 'r') as f:
                 magnet_link = f.read().strip()
             
@@ -63,12 +72,14 @@ class MagnetHandler(FileSystemEventHandler):
             
             self.select_files(torrent_id)
             
-            result = self.wait_for_torrent(torrent_id)
-            if not result:
+            results = self.wait_for_torrent(torrent_id)
+            if not results:
                 return
             
-            download_link, filename = result
-            self.download_file(download_link, filename)
+            # Download all files from the torrent
+            for download_link, filename in results:
+                if download_link and filename:
+                    self.download_file(download_link, filename)
             
             self.delete_torrent(torrent_id)
             
@@ -174,12 +185,53 @@ class MagnetHandler(FileSystemEventHandler):
                 
                 if status == 'downloaded':
                     logging.info(f"Torrent {torrent_id} completed successfully")
-                    link = data['links'][0]
-                    return self.unrestrict_link(link), data.get('filename', 'unknown')
+                    # Return all links for multi-file torrents
+                    links = data.get('links', [])
+                    return [(self.unrestrict_link(link), self.get_filename_from_link(link)) for link in links]
             time.sleep(10)
         
         logging.error(f"Torrent {torrent_id} not ready after 10 minutes")
         return None
+    
+    def get_filename_from_link(self, link):
+        """Extract filename from Real Debrid link"""
+        try:
+            # Make a HEAD request to get filename from headers
+            response = requests.head(link, timeout=10)
+            cd_header = response.headers.get('content-disposition', '')
+            if 'filename=' in cd_header:
+                filename = cd_header.split('filename=')[-1].strip('"').strip("'")
+                return self.sanitize_filename(filename)
+        except:
+            pass
+        
+        # Fallback to URL parsing
+        filename = link.split('/')[-1].split('?')[0]
+        return self.sanitize_filename(filename) if filename else 'download'
+    
+    def sanitize_filename(self, filename):
+        """Ensure filename has proper extension and length"""
+        if not filename:
+            return 'download'
+            
+        # Get file extension
+        name, ext = os.path.splitext(filename)
+        
+        # Ensure we have an extension for video files
+        if not ext and any(vid_ext in filename.lower() for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']):
+            for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']:
+                if vid_ext in filename.lower():
+                    ext = vid_ext
+                    name = filename.lower().split(vid_ext)[0]
+                    break
+        
+        # Limit filename length while preserving extension
+        max_length = 200  # Windows path limit consideration
+        if len(filename) > max_length:
+            name = name[:max_length - len(ext)]
+            filename = name + ext
+            
+        return filename
     
     def unrestrict_link(self, link):
         api_token = self.get_api_token()
@@ -198,21 +250,40 @@ class MagnetHandler(FileSystemEventHandler):
     def download_file(self, download_url, rd_filename=None):
         try:
             logging.info(f"Starting download from: {download_url}")
+            
+            # Get filename from URL if rd_filename is not a proper filename
+            if not rd_filename or not any(ext in rd_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                # Extract filename from URL
+                url_filename = download_url.split('/')[-1].split('?')[0]
+                if '%' in url_filename:
+                    import urllib.parse
+                    url_filename = urllib.parse.unquote(url_filename)
+                
+                # Use URL filename if it's a video file
+                if any(ext in url_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                    rd_filename = url_filename
+                else:
+                    logging.info(f"Skipping non-video file: {rd_filename or url_filename}")
+                    return
+                
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # Use Real Debrid filename first, then content-disposition, then URL
+            # Use provided filename or extract from headers/URL
             filename = rd_filename
             if not filename:
                 cd_header = response.headers.get('content-disposition', '')
                 if 'filename=' in cd_header:
                     filename = cd_header.split('filename=')[-1].strip('"').strip("'")
             if not filename:
-                filename = download_url.split('/')[-1]
+                filename = download_url.split('/')[-1].split('?')[0]
             if not filename:
                 filename = 'download'
             
-            # Download to in_progress folder first
+            # Sanitize filename
+            filename = self.sanitize_filename(filename)
+            
+            # Download to in_progress folder first (within sonarr/radarr directory)
             in_progress_folder = os.path.join(os.path.dirname(self.completed_folder), 'in_progress')
             os.makedirs(in_progress_folder, exist_ok=True)
             temp_path = os.path.join(in_progress_folder, filename)
@@ -235,6 +306,12 @@ class MagnetHandler(FileSystemEventHandler):
             # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
             final_path = os.path.join(self.completed_folder, filename)
+            
+            # Check if file already exists in completed folder
+            if os.path.exists(final_path):
+                logging.info(f"File already exists in completed folder, removing from in_progress: {filename}")
+                os.remove(temp_path)
+                return
             
             # Retry file move up to 5 times
             for attempt in range(5):
@@ -309,12 +386,13 @@ def main():
     os.makedirs(logs_dir, exist_ok=True)
     log_file = os.path.join(logs_dir, 'debridarr.log')
     
+    # Setup rotating log handler (100KB max, 3 backup files)
+    log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
+    log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file)
-        ]
+        handlers=[log_handler]
     )
     
     try:
@@ -341,15 +419,12 @@ def main():
     radarr_completed_magnets = os.path.join(radarr_dir, 'completed_magnets')
     radarr_completed = os.path.join(radarr_dir, 'completed_downloads')
     
-    in_progress_dir = os.path.join(content_dir, 'in_progress')
-    
     os.makedirs(sonarr_magnets, exist_ok=True)
     os.makedirs(sonarr_completed_magnets, exist_ok=True)
     os.makedirs(sonarr_completed, exist_ok=True)
     os.makedirs(radarr_magnets, exist_ok=True)
     os.makedirs(radarr_completed_magnets, exist_ok=True)
     os.makedirs(radarr_completed, exist_ok=True)
-    os.makedirs(in_progress_dir, exist_ok=True)
     
     # Create handlers
     sonarr_handler = MagnetHandler(config_path, sonarr_completed, sonarr_magnets, sonarr_completed_magnets)
