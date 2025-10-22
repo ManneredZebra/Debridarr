@@ -63,12 +63,14 @@ class MagnetHandler(FileSystemEventHandler):
             
             self.select_files(torrent_id)
             
-            result = self.wait_for_torrent(torrent_id)
-            if not result:
+            results = self.wait_for_torrent(torrent_id)
+            if not results:
                 return
             
-            download_link, filename = result
-            self.download_file(download_link, filename)
+            # Download all files from the torrent
+            for download_link, filename in results:
+                if download_link and filename:
+                    self.download_file(download_link, filename)
             
             self.delete_torrent(torrent_id)
             
@@ -174,12 +176,53 @@ class MagnetHandler(FileSystemEventHandler):
                 
                 if status == 'downloaded':
                     logging.info(f"Torrent {torrent_id} completed successfully")
-                    link = data['links'][0]
-                    return self.unrestrict_link(link), data.get('filename', 'unknown')
+                    # Return all links for multi-file torrents
+                    links = data.get('links', [])
+                    return [(self.unrestrict_link(link), self.get_filename_from_link(link)) for link in links]
             time.sleep(10)
         
         logging.error(f"Torrent {torrent_id} not ready after 10 minutes")
         return None
+    
+    def get_filename_from_link(self, link):
+        """Extract filename from Real Debrid link"""
+        try:
+            # Make a HEAD request to get filename from headers
+            response = requests.head(link, timeout=10)
+            cd_header = response.headers.get('content-disposition', '')
+            if 'filename=' in cd_header:
+                filename = cd_header.split('filename=')[-1].strip('"').strip("'")
+                return self.sanitize_filename(filename)
+        except:
+            pass
+        
+        # Fallback to URL parsing
+        filename = link.split('/')[-1].split('?')[0]
+        return self.sanitize_filename(filename) if filename else 'download'
+    
+    def sanitize_filename(self, filename):
+        """Ensure filename has proper extension and length"""
+        if not filename:
+            return 'download'
+            
+        # Get file extension
+        name, ext = os.path.splitext(filename)
+        
+        # Ensure we have an extension for video files
+        if not ext and any(vid_ext in filename.lower() for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']):
+            for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']:
+                if vid_ext in filename.lower():
+                    ext = vid_ext
+                    name = filename.lower().split(vid_ext)[0]
+                    break
+        
+        # Limit filename length while preserving extension
+        max_length = 200  # Windows path limit consideration
+        if len(filename) > max_length:
+            name = name[:max_length - len(ext)]
+            filename = name + ext
+            
+        return filename
     
     def unrestrict_link(self, link):
         api_token = self.get_api_token()
@@ -198,19 +241,28 @@ class MagnetHandler(FileSystemEventHandler):
     def download_file(self, download_url, rd_filename=None):
         try:
             logging.info(f"Starting download from: {download_url}")
+            
+            # Skip non-video files
+            if rd_filename and not any(ext in rd_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                logging.info(f"Skipping non-video file: {rd_filename}")
+                return
+                
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # Use Real Debrid filename first, then content-disposition, then URL
+            # Use provided filename or extract from headers/URL
             filename = rd_filename
             if not filename:
                 cd_header = response.headers.get('content-disposition', '')
                 if 'filename=' in cd_header:
                     filename = cd_header.split('filename=')[-1].strip('"').strip("'")
             if not filename:
-                filename = download_url.split('/')[-1]
+                filename = download_url.split('/')[-1].split('?')[0]
             if not filename:
                 filename = 'download'
+            
+            # Sanitize filename
+            filename = self.sanitize_filename(filename)
             
             # Download to in_progress folder first
             in_progress_folder = os.path.join(os.path.dirname(self.completed_folder), 'in_progress')

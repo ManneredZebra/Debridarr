@@ -4,7 +4,8 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 echo Building executable...
-pyinstaller --onefile --noconsole scripts\tray_app.py --name Debridarr
+pip install --upgrade pip
+python -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr
 
 echo Creating user data folders...
 set DEBRIDARR_DIR=%LOCALAPPDATA%\Debridarr
