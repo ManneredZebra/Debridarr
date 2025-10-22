@@ -5,7 +5,8 @@ python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
 echo Building executable...
-python -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr
+cd /d "%~dp0"
+python -m PyInstaller --onefile --noconsole scripts\tray_app.py --name Debridarr --distpath .
 
 echo Creating user data folders...
 set DEBRIDARR_DIR=%LOCALAPPDATA%\Debridarr
@@ -26,6 +27,10 @@ echo   "real_debrid_api_token": "YOUR_API_TOKEN_HERE" >> "%DEBRIDARR_DIR%\config
 echo } >> "%DEBRIDARR_DIR%\config.json"
 
 echo Setup complete! Please edit %LOCALAPPDATA%\Debridarr\config.json with your Real Debrid API token.
-echo Starting Debridarr in system tray...
-start dist\Debridarr.exe
+if exist Debridarr.exe (
+    echo Starting Debridarr in system tray...
+    start Debridarr.exe
+) else (
+    echo ERROR: Debridarr.exe was not created. Check the PyInstaller output above for errors.
+)
 pause
