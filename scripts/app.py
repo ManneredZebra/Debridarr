@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os
-import json
+import yaml
 import time
 import logging
 import requests
@@ -13,11 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder):
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder):
         self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
         self.completed_magnets_folder = completed_magnets_folder
+        self.in_progress_folder = in_progress_folder
         self.executor = ThreadPoolExecutor(max_workers=3)
         self.processing_files = set()
         
@@ -69,6 +70,13 @@ class MagnetHandler(FileSystemEventHandler):
             torrent_id = self.add_torrent(magnet_link)
             if not torrent_id:
                 return
+            if torrent_id == 'INFRINGING':
+                # Move magnet to completed to prevent reprocessing
+                os.makedirs(self.completed_magnets_folder, exist_ok=True)
+                filename = os.path.basename(file_path)
+                os.rename(file_path, os.path.join(self.completed_magnets_folder, filename))
+                logging.info(f"Moved infringing magnet to completed: {filename}")
+                return
             
             self.select_files(torrent_id)
             
@@ -112,7 +120,7 @@ class MagnetHandler(FileSystemEventHandler):
     def get_api_token(self):
         try:
             with open(self.config_path, 'r') as f:
-                config = json.load(f)
+                config = yaml.safe_load(f)
             return config['real_debrid_api_token'].strip().strip('"').strip("'")
         except Exception as e:
             logging.error(f"Error reading config: {e}")
@@ -139,9 +147,20 @@ class MagnetHandler(FileSystemEventHandler):
                 torrent_id = response.json()['id']
                 logging.info(f"Torrent added successfully: {torrent_id}")
                 return torrent_id
-            
-            logging.error(f"Failed to add torrent (status {response.status_code}): {response.text}")
-            return None
+            elif response.status_code == 429:
+                logging.warning("Rate limit exceeded, waiting 1 minute...")
+                time.sleep(60)
+                return None
+            else:
+                try:
+                    error_data = response.json()
+                    if error_data.get('error_code') == 35:
+                        logging.error(f"Infringing file detected, marking as failed: {response.text}")
+                        return 'INFRINGING'
+                except:
+                    pass
+                logging.error(f"Failed to add torrent (status {response.status_code}): {response.text}")
+                return None
         except requests.RequestException as e:
             logging.error(f"Network error adding torrent: {e}")
             return None
@@ -260,7 +279,7 @@ class MagnetHandler(FileSystemEventHandler):
                     url_filename = urllib.parse.unquote(url_filename)
                 
                 # Use URL filename if it's a video file
-                if any(ext in url_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
+                if any(ext in url_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']) and not url_filename.lower().endswith('.rartv'):
                     rd_filename = url_filename
                 else:
                     logging.info(f"Skipping non-video file: {rd_filename or url_filename}")
@@ -283,10 +302,9 @@ class MagnetHandler(FileSystemEventHandler):
             # Sanitize filename
             filename = self.sanitize_filename(filename)
             
-            # Download to in_progress folder first (within sonarr/radarr directory)
-            in_progress_folder = os.path.join(os.path.dirname(self.completed_folder), 'in_progress')
-            os.makedirs(in_progress_folder, exist_ok=True)
-            temp_path = os.path.join(in_progress_folder, filename)
+            # Download to configured in_progress folder first
+            os.makedirs(self.in_progress_folder, exist_ok=True)
+            temp_path = os.path.join(self.in_progress_folder, filename)
             
             logging.info(f"Downloading to temporary location: {temp_path}")
             total_size = int(response.headers.get('content-length', 0))
@@ -396,47 +414,50 @@ def main():
     )
     
     try:
-        config_path = os.path.join(base_dir, 'config.json')
+        config_path = os.path.join(base_dir, 'config.yaml')
         with open(config_path, 'r') as f:
-            config = json.load(f)
+            config = yaml.safe_load(f)
     except FileNotFoundError:
-        logging.error("config.json not found. Please run setup.bat first.")
+        logging.error("config.yaml not found. Please run setup.bat first.")
         return
-    except json.JSONDecodeError:
-        logging.error("Invalid JSON in config.json. Please check the file format.")
+    except yaml.YAMLError:
+        logging.error("Invalid YAML in config.yaml. Please check the file format.")
         return
     
     # Define organized folder paths
     content_dir = os.path.join(base_dir, 'content')
     
-    sonarr_dir = os.path.join(content_dir, 'sonarr')
-    sonarr_magnets = os.path.join(sonarr_dir, 'magnets')
-    sonarr_completed_magnets = os.path.join(sonarr_dir, 'completed_magnets')
-    sonarr_completed = os.path.join(sonarr_dir, 'completed_downloads')
+    # Get download clients from config
+    download_clients = config.get('download_clients', {})
     
-    radarr_dir = os.path.join(content_dir, 'radarr')
-    radarr_magnets = os.path.join(radarr_dir, 'magnets')
-    radarr_completed_magnets = os.path.join(radarr_dir, 'completed_magnets')
-    radarr_completed = os.path.join(radarr_dir, 'completed_downloads')
-    
-    os.makedirs(sonarr_magnets, exist_ok=True)
-    os.makedirs(sonarr_completed_magnets, exist_ok=True)
-    os.makedirs(sonarr_completed, exist_ok=True)
-    os.makedirs(radarr_magnets, exist_ok=True)
-    os.makedirs(radarr_completed_magnets, exist_ok=True)
-    os.makedirs(radarr_completed, exist_ok=True)
-    
-    # Create handlers
-    sonarr_handler = MagnetHandler(config_path, sonarr_completed, sonarr_magnets, sonarr_completed_magnets)
-    radarr_handler = MagnetHandler(config_path, radarr_completed, radarr_magnets, radarr_completed_magnets)
-    
-    # Process existing magnet files
-    process_existing_magnets(sonarr_magnets, sonarr_handler)
-    process_existing_magnets(radarr_magnets, radarr_handler)
-    
+    handlers = []
     observer = Observer()
-    observer.schedule(sonarr_handler, sonarr_magnets, recursive=False)
-    observer.schedule(radarr_handler, radarr_magnets, recursive=False)
+    
+    # Create handlers for each configured client
+    for client_name, client_config in download_clients.items():
+        magnets_folder = os.path.expandvars(client_config['magnets_folder'])
+        in_progress_folder = os.path.expandvars(client_config['in_progress_folder'])
+        completed_magnets_folder = os.path.expandvars(client_config['completed_magnets_folder'])
+        completed_downloads_folder = os.path.expandvars(client_config['completed_downloads_folder'])
+        
+        # Create directories
+        os.makedirs(magnets_folder, exist_ok=True)
+        os.makedirs(in_progress_folder, exist_ok=True)
+        os.makedirs(completed_magnets_folder, exist_ok=True)
+        os.makedirs(completed_downloads_folder, exist_ok=True)
+        
+        # Create handler
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder)
+        handlers.append((client_name, handler, magnets_folder))
+        
+        # Schedule observer
+        observer.schedule(handler, magnets_folder, recursive=False)
+        
+        logging.info(f"Configured client: {client_name}")
+    
+    # Process existing magnet files for all clients
+    for client_name, handler, magnets_folder in handlers:
+        process_existing_magnets(magnets_folder, handler)
     
     try:
         observer.start()
@@ -444,9 +465,9 @@ def main():
         
         while True:
             time.sleep(30)
-            # Retry processing any remaining magnet files
-            process_existing_magnets(sonarr_magnets, sonarr_handler)
-            process_existing_magnets(radarr_magnets, radarr_handler)
+            # Retry processing any remaining magnet files for all clients
+            for client_name, handler, magnets_folder in handlers:
+                process_existing_magnets(magnets_folder, handler)
     except KeyboardInterrupt:
         logging.info("Shutting down...")
     except Exception as e:
