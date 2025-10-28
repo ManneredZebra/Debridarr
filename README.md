@@ -28,15 +28,15 @@ real_debrid_api_token: "YOUR_API_TOKEN_HERE"
 
 download_clients:
   sonarr:
-    magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\magnets"
-    in_progress_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\in_progress"
-    completed_magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\completed_magnets"
-    completed_downloads_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\completed_downloads"
+    magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\magnets"
+    in_progress_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\in_progress"
+    completed_magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\completed_magnets"
+    completed_downloads_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\completed_downloads"
   radarr:
-    magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\magnets"
-    in_progress_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\in_progress"
-    completed_magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\completed_magnets"
-    completed_downloads_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\completed_downloads"
+    magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\magnets"
+    in_progress_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\in_progress"
+    completed_magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\completed_magnets"
+    completed_downloads_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\completed_downloads"
 ```
 
 ### 3. Installation
