@@ -14,23 +14,22 @@ mkdir "%DEBRIDARR_DIR%" 2>nul
 mkdir "%DEBRIDARR_DIR%\logs" 2>nul
 mkdir "%DEBRIDARR_DIR%\content" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\sonarr\magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\sonarr\in_progress" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\sonarr\completed_magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\sonarr\completed_downloads" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\magnets" 2>nul
+mkdir "%DEBRIDARR_DIR%\content\radarr\in_progress" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\completed_magnets" 2>nul
 mkdir "%DEBRIDARR_DIR%\content\radarr\completed_downloads" 2>nul
 
 echo Creating config file...
-if not exist "%DEBRIDARR_DIR%\config.json" (
-    echo { > "%DEBRIDARR_DIR%\config.json"
-    echo   "real_debrid_api_token": "YOUR_API_TOKEN_HERE" >> "%DEBRIDARR_DIR%\config.json"
-    echo } >> "%DEBRIDARR_DIR%\config.json"
-    echo Config file created.
+if not exist "%DEBRIDARR_DIR%\config.yaml" (
+    py create_config.py
 ) else (
     echo Config file already exists, skipping.
 )
 
-echo Setup complete! Please edit %LOCALAPPDATA%\Debridarr\config.json with your Real Debrid API token.
+echo Setup complete! Please edit %LOCALAPPDATA%\Debridarr\config.yaml with your Real Debrid API token.
 if exist Debridarr.exe (
     echo Starting Debridarr in system tray...
     start Debridarr.exe
