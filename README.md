@@ -28,15 +28,15 @@ real_debrid_api_token: "YOUR_API_TOKEN_HERE"
 
 download_clients:
   sonarr:
-    magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\magnets"
-    in_progress_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\in_progress"
-    completed_magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\completed_magnets"
-    completed_downloads_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\sonarr\\completed_downloads"
+    magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/magnets"
+    in_progress_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/in_progress"
+    completed_magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/completed_magnets"
+    completed_downloads_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/completed_downloads"
   radarr:
-    magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\magnets"
-    in_progress_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\in_progress"
-    completed_magnets_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\completed_magnets"
-    completed_downloads_folder: "C:\\Users\\YourUser\\AppData\\Local\\Debridarr\\content\\radarr\\completed_downloads"
+    magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/magnets"
+    in_progress_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/in_progress"
+    completed_magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/completed_magnets"
+    completed_downloads_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/completed_downloads"
 ```
 
 ### 3. Installation
@@ -85,10 +85,10 @@ To add additional download clients (like Lidarr), add them to your config.yaml:
 download_clients:
   # Existing clients...
   lidarr:
-    magnets_folder: "D:\\Downloads\\Lidarr\\Magnets"
-    in_progress_folder: "D:\\Downloads\\Lidarr\\InProgress"
-    completed_magnets_folder: "D:\\Downloads\\Lidarr\\CompletedMagnets"
-    completed_downloads_folder: "D:\\Downloads\\Lidarr\\Completed"
+    magnets_folder: "D:/Downloads/Lidarr/Magnets"
+    in_progress_folder: "D:/Downloads/Lidarr/InProgress"
+    completed_magnets_folder: "D:/Downloads/Lidarr/CompletedMagnets"
+    completed_downloads_folder: "D:/Downloads/Lidarr/Completed"
 ```
 
 ### How it Works
