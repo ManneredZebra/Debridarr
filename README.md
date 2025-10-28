@@ -21,25 +21,32 @@ A lightweight Windows application that monitors folders for magnet links from So
 ### 2. Configuration
 
 After running setup.bat, edit your Real Debrid API token in:
-`%LOCALAPPDATA%\Debridarr\config.json`
+`%LOCALAPPDATA%\Debridarr\config.yaml`
 
-```json
-{
-  "real_debrid_api_token": "YOUR_API_TOKEN_HERE"
-}
+```yaml
+real_debrid_api_token: "YOUR_API_TOKEN_HERE"
+
+download_clients:
+  sonarr:
+    magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\magnets"
+    in_progress_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\in_progress"
+    completed_magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\completed_magnets"
+    completed_downloads_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\sonarr\completed_downloads"
+  radarr:
+    magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\magnets"
+    in_progress_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\in_progress"
+    completed_magnets_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\completed_magnets"
+    completed_downloads_folder: "C:\Users\YourUser\AppData\Local\Debridarr\content\radarr\completed_downloads"
 ```
 
 ### 3. Installation
 
-1. Run the setup script:
+1. Run the setup script as Administrator:
 ```cmd
 setup.bat
 ```
 
-2. Start the application:
-```cmd
-Debridarr.exe
-```
+2. The application will be installed to `C:\Program Files\Debridarr\bin\Debridarr.exe`
 
 3. To uninstall:
 ```cmd
@@ -53,8 +60,8 @@ uninstall.bat
 1. Go to Settings > Download Clients
 2. Add a new Download Client with type "Torrent Blackhole"
 3. Set the following settings:
-   - **Torrent Folder**: `%LOCALAPPDATA%\Debridarr\content\sonarr\magnets`
-   - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\sonarr\completed_downloads`
+   - **Torrent Folder**: Use the `magnets_folder` path from your config.yaml
+   - **Watch Folder**: Use the `completed_downloads_folder` path from your config.yaml
    - **Save Magnet Links**: ✓ (checked)
    - **Magnet File Extension**: `.magnet`
    - **Read Only**: ☐ (unchecked)
@@ -64,11 +71,25 @@ uninstall.bat
 1. Go to Settings > Download Clients
 2. Add a new Download Client with type "Torrent Blackhole"
 3. Set the following settings:
-   - **Torrent Folder**: `%LOCALAPPDATA%\Debridarr\content\radarr\magnets`
-   - **Watch Folder**: `%LOCALAPPDATA%\Debridarr\content\radarr\completed_downloads`
+   - **Torrent Folder**: Use the `magnets_folder` path from your config.yaml
+   - **Watch Folder**: Use the `completed_downloads_folder` path from your config.yaml
    - **Save Magnet Links**: ✓ (checked)
    - **Magnet File Extension**: `.magnet`
    - **Read Only**: ☐ (unchecked)
+
+### Add Custom Download Clients
+
+To add additional download clients (like Lidarr), add them to your config.yaml:
+
+```yaml
+download_clients:
+  # Existing clients...
+  lidarr:
+    magnets_folder: "D:\\Downloads\\Lidarr\\Magnets"
+    in_progress_folder: "D:\\Downloads\\Lidarr\\InProgress"
+    completed_magnets_folder: "D:\\Downloads\\Lidarr\\CompletedMagnets"
+    completed_downloads_folder: "D:\\Downloads\\Lidarr\\Completed"
+```
 
 ### How it Works
 
@@ -89,13 +110,14 @@ Debridarr/
 
 ## Logs
 
-Logs are displayed in the console window and saved to `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`.
+Logs are saved to `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`.
 
 ## Troubleshooting
 
 - Ensure your Real Debrid API token is valid
 - Check that magnet files contain valid magnet links
 - Monitor logs at `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`
+- Check config.yaml format is valid YAML
 - Verify folder permissions for the application
 - Run setup.bat as Administrator if needed
 - Ensure Sonarr/Radarr can access the configured folder paths
