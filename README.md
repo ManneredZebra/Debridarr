@@ -4,11 +4,14 @@ A lightweight Windows application that monitors folders for magnet links from So
 
 ## Features
 
-- Monitors `sonarr_magnets` and `radarr_magnets` folders for `.magnet` files
+- Web-based UI for monitoring and management
+- Monitors folders for `.magnet` files from Sonarr, Radarr, and other clients
 - Automatically processes magnet links through Real Debrid API
-- Downloads completed files to `sonarr_completed` and `radarr_completed` folders
+- Real-time download progress tracking with individual file progress
+- Downloads completed files to configured folders
 - Cleans up torrents from Real Debrid after download
 - Comprehensive logging for troubleshooting
+- System tray application - runs in background
 - Lightweight and responsive
 
 ## Setup
@@ -20,23 +23,34 @@ A lightweight Windows application that monitors folders for magnet links from So
 
 ### 2. Configuration
 
-After running setup.bat, edit your Real Debrid API token in:
-`%LOCALAPPDATA%\Debridarr\config.yaml`
+After running setup.bat, the Web UI will automatically open at http://127.0.0.1:3636
+
+#### Option A: Configure via Web UI (Recommended)
+
+1. Click on the **Settings** tab in the Web UI
+2. Enter your Real Debrid API token (will be masked after saving)
+3. Modify folder paths for Sonarr/Radarr or add new download clients
+4. Click **Save Configuration** - changes apply immediately
+
+#### Option B: Edit Config File Directly
+
+Alternatively, you can edit the config file directly at:
+`C:\ProgramData\Debridarr\config.yaml`
 
 ```yaml
 real_debrid_api_token: "YOUR_API_TOKEN_HERE"
 
 download_clients:
   sonarr:
-    magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/magnets"
-    in_progress_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/in_progress"
-    completed_magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/completed_magnets"
-    completed_downloads_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/sonarr/completed_downloads"
+    magnets_folder: "C:/ProgramData/Debridarr/sonarr/magnets"
+    in_progress_folder: "C:/ProgramData/Debridarr/sonarr/in_progress"
+    completed_magnets_folder: "C:/ProgramData/Debridarr/sonarr/completed_magnets"
+    completed_downloads_folder: "C:/ProgramData/Debridarr/sonarr/completed_downloads"
   radarr:
-    magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/magnets"
-    in_progress_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/in_progress"
-    completed_magnets_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/completed_magnets"
-    completed_downloads_folder: "C:/Users/YourUser/AppData/Local/Debridarr/content/radarr/completed_downloads"
+    magnets_folder: "C:/ProgramData/Debridarr/radarr/magnets"
+    in_progress_folder: "C:/ProgramData/Debridarr/radarr/in_progress"
+    completed_magnets_folder: "C:/ProgramData/Debridarr/radarr/completed_magnets"
+    completed_downloads_folder: "C:/ProgramData/Debridarr/radarr/completed_downloads"
 ```
 
 ### 3. Installation
@@ -52,6 +66,45 @@ setup.bat
 ```cmd
 uninstall.bat
 ```
+
+## Web UI
+
+The Web UI is accessible at **http://127.0.0.1:3636** and provides:
+
+### Overview Tab
+- System health monitoring with automatic checks
+- View active download counts for each client
+- See folder file counts (Magnets, In Progress, Completed)
+- **View Details** button to jump to active downloads when downloads are active
+- **Clean Up** button to remove leftover files not actively downloading
+
+### Active Downloads Tab
+- Badge showing total active download count
+- Real-time progress tracking with dual progress bars:
+  - Real-Debrid Cache progress
+  - Files Complete progress
+- Individual file progress for multi-file torrents with clean filenames
+- **Abort** button at top of each download to immediately cancel and stop all queued files
+
+### History Tab
+- View completed magnet files
+- **Retry** button to reprocess failed downloads
+
+### Completed Downloads Tab
+- View all downloaded video files
+- **Delete** button to remove files
+
+### Logs Tab
+- View last 100 log entries
+- Real-time log monitoring
+
+### Settings Tab
+- Warning badge (⚠) appears when configuration issues detected
+- Configure Real Debrid API token (masked after saving)
+- Manage download clients (Sonarr, Radarr, etc.)
+- Add/remove custom download clients
+- Edit folder paths for each client
+- Changes apply immediately without restart
 
 ## Usage
 
@@ -79,7 +132,14 @@ uninstall.bat
 
 ### Add Custom Download Clients
 
-To add additional download clients (like Lidarr), add them to your config.yaml:
+#### Via Web UI:
+1. Go to the **Settings** tab
+2. Click **Add New Client**
+3. Enter client name and configure folder paths
+4. Click **Save Configuration**
+
+#### Via Config File:
+Add them to your config.yaml:
 
 ```yaml
 download_clients:
@@ -110,14 +170,28 @@ Debridarr/
 
 ## Logs
 
-Logs are saved to `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`.
+Logs can be viewed in the **Logs** tab of the Web UI or directly at:
+`C:\ProgramData\Debridarr\logs\debridarr.log`
+
+## System Health Monitoring
+
+Debridarr automatically monitors system health and displays warnings on the Overview tab when issues are detected:
+
+- **API Connectivity**: Validates Real-Debrid API is reachable with your token
+- **Directory Access**: Checks all configured folders exist and are writable
+- **Automatic Checks**: Runs on startup, every 10 minutes, and immediately after settings changes
+- **Warning Badge**: Yellow triangle (⚠) appears on Settings tab when issues need attention
+
+Each warning includes specific guidance on how to resolve the issue.
 
 ## Troubleshooting
 
-- Ensure your Real Debrid API token is valid
-- Check that magnet files contain valid magnet links
-- Monitor logs at `%LOCALAPPDATA%\Debridarr\logs\debridarr.log`
-- Check config.yaml format is valid YAML
-- Verify folder permissions for the application
+- Access the Web UI at http://127.0.0.1:3636 to monitor downloads
+- Check the **Overview** tab for system health warnings with solutions
+- Review the **Logs** tab in the Web UI for detailed error messages
+- Ensure your Real Debrid API token is valid (Settings tab will show warning)
+- Use the **Clean Up** button to remove leftover files from failed downloads
+- Verify folder permissions for `C:\ProgramData\Debridarr`
 - Run setup.bat as Administrator if needed
-- Ensure Sonarr/Radarr can access the configured folder paths
+- Ensure Sonarr/Radarr can write to the configured magnet folders
+- User data in `C:\ProgramData\Debridarr` is preserved during uninstall
