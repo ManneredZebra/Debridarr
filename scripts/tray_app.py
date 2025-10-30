@@ -49,7 +49,8 @@ def main():
     mutex = kernel32.CreateMutexW(None, True, mutex_name)
     
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        print("Debridarr is already running")
+        # App already running, just open the web UI
+        os.system("start http://127.0.0.1:3636")
         sys.exit(0)
     
     try:

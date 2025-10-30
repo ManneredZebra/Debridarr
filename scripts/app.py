@@ -495,45 +495,23 @@ def process_existing_magnets(magnets_folder, handler):
     except Exception as e:
         logging.error(f"Error scanning magnet folder {magnets_folder}: {e}")
 
-def main(shutdown_event=None):
-    # All data in ProgramData for write access and preservation
+def setup_handlers(config_path, observer):
+    """Setup or reload handlers based on current config"""
     base_dir = 'C:\\ProgramData\\Debridarr'
     
-    # Setup logging
-    logs_dir = os.path.join(base_dir, 'logs')
-    os.makedirs(logs_dir, exist_ok=True)
-    log_file = os.path.join(logs_dir, 'debridarr.log')
-    
-    # Setup rotating log handler (100KB max, 3 backup files)
-    log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
-    log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[log_handler]
-    )
-    
     try:
-        config_path = os.path.join(base_dir, 'config.yaml')
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-    except FileNotFoundError:
-        logging.error("config.yaml not found. Please run setup.bat first.")
-        return
-    except yaml.YAMLError:
-        logging.error("Invalid YAML in config.yaml. Please check the file format.")
-        return
+    except:
+        logging.error("Failed to load config for handler setup")
+        return []
     
-    # Content stored in ProgramData
-    content_dir = base_dir
-    
-    # Get download clients from config
-    download_clients = config.get('download_clients', {})
+    # Stop existing handlers
+    observer.unschedule_all()
     
     handlers = []
-    observer = Observer()
+    download_clients = config.get('download_clients', {})
     
-    # Create handlers for each configured client
     for client_name, client_config in download_clients.items():
         magnets_folder = os.path.expandvars(client_config['magnets_folder'])
         in_progress_folder = os.path.expandvars(client_config['in_progress_folder'])
@@ -555,6 +533,44 @@ def main(shutdown_event=None):
         
         logging.info(f"Configured client: {client_name}")
     
+    return handlers
+
+def main(shutdown_event=None):
+    # All data in ProgramData for write access and preservation
+    base_dir = 'C:\\ProgramData\\Debridarr'
+    
+    # Setup logging
+    logs_dir = os.path.join(base_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    log_file = os.path.join(logs_dir, 'debridarr.log')
+    
+    # Setup rotating log handler (100KB max, 3 backup files)
+    log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
+    log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[log_handler]
+    )
+    
+    config_path = os.path.join(base_dir, 'config.yaml')
+    observer = Observer()
+    handlers = []
+    
+    # Setup initial handlers
+    handlers = setup_handlers(config_path, observer)
+    if not handlers:
+        logging.error("Failed to setup handlers. Check config.yaml")
+        return
+    
+    # Reload callback for when settings change
+    def reload_handlers():
+        nonlocal handlers
+        logging.info("Reloading configuration...")
+        time.sleep(1)  # Brief delay to ensure config is written
+        handlers = setup_handlers(config_path, observer)
+        logging.info("Configuration reloaded successfully")
+    
     # Process existing magnet files for all clients
     for client_name, handler, magnets_folder in handlers:
         process_existing_magnets(magnets_folder, handler)
@@ -563,8 +579,8 @@ def main(shutdown_event=None):
         observer.start()
         logging.info("Debridarr started - monitoring for magnet files")
         
-        # Start web UI in separate thread
-        web_ui = WebUI(config_path, handlers)
+        # Start web UI in separate thread with reload callback
+        web_ui = WebUI(config_path, handlers, reload_callback=reload_handlers)
         web_thread = threading.Thread(target=web_ui.run, daemon=True)
         web_thread.start()
         logging.info("Web UI started on http://127.0.0.1:3636")

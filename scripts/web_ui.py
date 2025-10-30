@@ -9,9 +9,10 @@ from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime
 
 class WebUI:
-    def __init__(self, config_path, handlers):
+    def __init__(self, config_path, handlers, reload_callback=None):
         self.config_path = config_path
         self.handlers = handlers
+        self.reload_callback = reload_callback
         self.app = Flask(__name__)
         self.setup_routes()
         
@@ -158,17 +159,49 @@ class WebUI:
                 with open(self.config_path, 'r') as f:
                     config = yaml.safe_load(f)
                 
-                history = {}
+                sort_by = request.args.get('sort', 'date_desc')  # date_desc, date_asc, name_asc, name_desc
+                page = int(request.args.get('page', 1))
+                per_page = 50
+                
+                all_files = []
                 for client_name, client_config in config.get('download_clients', {}).items():
                     completed_magnets_folder = os.path.expandvars(client_config['completed_magnets_folder'])
                     if os.path.exists(completed_magnets_folder):
-                        files = [f for f in os.listdir(completed_magnets_folder) if f.endswith('.magnet')]
-                        history[client_name] = files
-                    else:
-                        history[client_name] = []
-                return jsonify(history)
+                        for filename in os.listdir(completed_magnets_folder):
+                            if filename.endswith('.magnet'):
+                                file_path = os.path.join(completed_magnets_folder, filename)
+                                mtime = os.path.getmtime(file_path)
+                                all_files.append({
+                                    'client': client_name,
+                                    'filename': filename,
+                                    'timestamp': mtime
+                                })
+                
+                # Sort files
+                if sort_by == 'date_desc':
+                    all_files.sort(key=lambda x: x['timestamp'], reverse=True)
+                elif sort_by == 'date_asc':
+                    all_files.sort(key=lambda x: x['timestamp'])
+                elif sort_by == 'name_asc':
+                    all_files.sort(key=lambda x: x['filename'])
+                elif sort_by == 'name_desc':
+                    all_files.sort(key=lambda x: x['filename'], reverse=True)
+                
+                # Paginate
+                total = len(all_files)
+                start = (page - 1) * per_page
+                end = start + per_page
+                paginated = all_files[start:end]
+                
+                return jsonify({
+                    'files': paginated,
+                    'total': total,
+                    'page': page,
+                    'per_page': per_page,
+                    'total_pages': (total + per_page - 1) // per_page
+                })
             except:
-                return jsonify({})
+                return jsonify({'files': [], 'total': 0, 'page': 1, 'per_page': 50, 'total_pages': 0})
                 
         @self.app.route('/api/completed')
         def get_completed():
@@ -356,6 +389,10 @@ class WebUI:
                 with open(self.config_path, 'w') as f:
                     yaml.dump(new_config, f, default_flow_style=False, sort_keys=False)
                 
+                # Trigger reload of handlers
+                if self.reload_callback:
+                    threading.Thread(target=self.reload_callback, daemon=True).start()
+                
                 return jsonify({'success': True, 'message': 'Configuration saved successfully.', 'recheck': True})
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e), 'recheck': False})
@@ -432,7 +469,17 @@ HTML_TEMPLATE = '''
             </div>
             <div id="history" class="section">
                 <h1>Download History</h1>
+                <div style="margin: 10px 0;">
+                    <label style="color: #ccc; margin-right: 10px;">Sort by:</label>
+                    <select id="history-sort" style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px;">
+                        <option value="date_desc">Date (Newest First)</option>
+                        <option value="date_asc">Date (Oldest First)</option>
+                        <option value="name_asc">Name (A-Z)</option>
+                        <option value="name_desc">Name (Z-A)</option>
+                    </select>
+                </div>
                 <div id="history-list"></div>
+                <div id="history-pagination" style="margin: 20px 0; text-align: center;"></div>
             </div>
             <div id="completed" class="section">
                 <h1>Completed Downloads</h1>
@@ -465,7 +512,7 @@ HTML_TEMPLATE = '''
             localStorage.setItem('activeTab', section);
             
             if (section === 'logs') loadLogs();
-            if (section === 'history') loadHistory();
+            if (section === 'history') loadHistory(1);
             if (section === 'completed') loadCompleted();
             if (section === 'settings') loadSettings();
         }
@@ -671,38 +718,85 @@ HTML_TEMPLATE = '''
             }
         }
 
-        function loadHistory() {
-            fetch('/api/history')
+        let currentHistoryPage = 1;
+        let currentHistorySort = 'date_desc';
+        
+        function loadHistory(page = 1) {
+            currentHistoryPage = page;
+            const sortSelect = document.getElementById('history-sort');
+            if (sortSelect) {
+                currentHistorySort = sortSelect.value;
+            }
+            
+            fetch(`/api/history?sort=${currentHistorySort}&page=${page}`)
                 .then(r => r.json())
                 .then(data => {
                     const historyList = document.getElementById('history-list');
+                    const pagination = document.getElementById('history-pagination');
                     historyList.innerHTML = '';
                     
-                    Object.entries(data).forEach(([client, files]) => {
-                        files.forEach(file => {
+                    if (data.files && data.files.length > 0) {
+                        data.files.forEach(fileData => {
                             const item = document.createElement('div');
                             item.className = 'download-item';
                             
+                            const date = new Date(fileData.timestamp * 1000).toLocaleString();
+                            
                             const label = document.createElement('span');
-                            label.innerHTML = `<strong>${client.toUpperCase()}</strong>: ${file} `;
+                            label.innerHTML = `<strong>${fileData.client.toUpperCase()}</strong>: ${fileData.filename}<br><span style="font-size: 11px; color: #999;">Completed: ${date}</span> `;
                             
                             const retryBtn = document.createElement('button');
                             retryBtn.className = 'retry-btn';
                             retryBtn.textContent = 'Retry';
-                            retryBtn.onclick = function() { retryDownload(client, file); };
+                            retryBtn.onclick = function() { retryDownload(fileData.client, fileData.filename); };
                             
                             item.appendChild(label);
                             item.appendChild(retryBtn);
                             historyList.appendChild(item);
                         });
-                    });
-                    
-                    if (historyList.innerHTML === '') {
+                        
+                        // Pagination controls
+                        if (data.total_pages > 1) {
+                            pagination.innerHTML = '';
+                            
+                            if (page > 1) {
+                                const prevBtn = document.createElement('button');
+                                prevBtn.className = 'retry-btn';
+                                prevBtn.textContent = 'Previous';
+                                prevBtn.onclick = () => loadHistory(page - 1);
+                                pagination.appendChild(prevBtn);
+                            }
+                            
+                            const pageInfo = document.createElement('span');
+                            pageInfo.style.margin = '0 15px';
+                            pageInfo.textContent = `Page ${page} of ${data.total_pages} (${data.total} total)`;
+                            pagination.appendChild(pageInfo);
+                            
+                            if (page < data.total_pages) {
+                                const nextBtn = document.createElement('button');
+                                nextBtn.className = 'retry-btn';
+                                nextBtn.textContent = 'Next';
+                                nextBtn.onclick = () => loadHistory(page + 1);
+                                pagination.appendChild(nextBtn);
+                            }
+                        } else {
+                            pagination.innerHTML = '';
+                        }
+                    } else {
                         historyList.innerHTML = '<div class="download-item">No download history</div>';
+                        pagination.innerHTML = '';
                     }
                 })
                 .catch(err => console.error('loadHistory error:', err));
         }
+        
+        // Add event listener for sort change
+        document.addEventListener('DOMContentLoaded', function() {
+            const sortSelect = document.getElementById('history-sort');
+            if (sortSelect) {
+                sortSelect.addEventListener('change', () => loadHistory(1));
+            }
+        });
 
         function loadCompleted() {
             fetch('/api/completed')
@@ -939,7 +1033,7 @@ HTML_TEMPLATE = '''
         if (index >= 0) navItems[index].classList.add('active');
         
         if (savedTab === 'logs') loadLogs();
-        if (savedTab === 'history') loadHistory();
+        if (savedTab === 'history') loadHistory(1);
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();
         
