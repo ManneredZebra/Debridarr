@@ -409,38 +409,42 @@ HTML_TEMPLATE = '''
     <title>Debridarr Web UI</title>
     <link rel="icon" type="image/png" href="/favicon.ico">
     <style>
-        body { margin: 0; font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; }
+        body { margin: 0; font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; font-size: 15px; }
         .container { display: flex; height: 100vh; }
         .sidebar { width: 250px; background: #2d2d2d; padding: 20px; }
         .content { flex: 1; padding: 20px; overflow-y: auto; }
-        .nav-item { padding: 10px; margin: 5px 0; background: #3d3d3d; border-radius: 5px; cursor: pointer; }
+        .nav-item { padding: 12px; margin: 5px 0; background: #3d3d3d; border-radius: 5px; cursor: pointer; font-size: 15px; }
         .nav-item:hover { background: #4d4d4d; }
         .nav-item.active { background: #007acc; }
         .section { display: none; }
         .section.active { display: block; }
-        .download-item { background: #2d2d2d; padding: 15px; margin: 10px 0; border-radius: 5px; }
-        .abort-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; }
-        .retry-btn { background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; margin-right: 5px; }
-        .delete-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; }
+        .download-item { background: #2d2d2d; padding: 15px; margin: 10px 0; border-radius: 5px; font-size: 15px; }
+        .abort-btn { background: #dc3545; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; font-size: 14px; }
+        .retry-btn { background: #28a745; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; margin-right: 5px; font-size: 14px; }
+        .delete-btn { background: #dc3545; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; font-size: 14px; }
         .progress-container { display: flex; gap: 10px; margin: 10px 0; }
-        .progress-bar { flex: 1; height: 20px; background: #444; border-radius: 10px; position: relative; }
+        .progress-bar { flex: 1; height: 24px; background: #444; border-radius: 10px; position: relative; }
         .progress-fill { height: 100%; border-radius: 10px; transition: width 0.3s; }
-        .progress-text { position: absolute; top: 0; left: 0; right: 0; text-align: center; line-height: 20px; color: white; font-size: 12px; }
+        .progress-text { position: absolute; top: 0; left: 0; right: 0; text-align: center; line-height: 24px; color: white; font-size: 14px; }
         .cache-progress .progress-fill { background: #28a745; }
         .download-progress .progress-fill { background: #007acc; }
-        .progress-label { font-size: 11px; color: #ccc; margin-bottom: 2px; }
-        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px; }
-        .status-good { color: #28a745; }
-        .status-active { color: #ffc107; }
+        .progress-label { font-size: 13px; color: #ccc; margin-bottom: 2px; }
+        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: monospace; font-size: 14px; }
+        .status-good { color: #28a745; font-size: 15px; }
+        .status-active { color: #ffc107; font-size: 15px; }
         .settings-group { background: #2d2d2d; padding: 20px; margin: 15px 0; border-radius: 5px; }
-        .settings-group h3 { margin-top: 0; }
+        .settings-group h3 { margin-top: 0; font-size: 20px; }
+        .settings-group h4 { font-size: 18px; }
         .form-row { margin: 15px 0; }
-        .form-row label { display: block; margin-bottom: 5px; color: #ccc; }
-        .form-row input { width: 100%; padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; box-sizing: border-box; }
-        .save-btn { background: #007acc; color: white; border: none; padding: 10px 20px; border-radius: 3px; cursor: pointer; margin-top: 10px; }
-        .add-client-btn { background: #28a745; color: white; border: none; padding: 8px 15px; border-radius: 3px; cursor: pointer; margin-top: 10px; }
-        .remove-client-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; float: right; }
-        .warning-box { background: #dc3545; color: white; padding: 15px; margin: 15px 0; border-radius: 5px; border-left: 5px solid #a02a2a; }
+        .form-row label { display: block; margin-bottom: 5px; color: #ccc; font-size: 14px; }
+        .form-row input { width: 100%; padding: 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; box-sizing: border-box; font-size: 14px; }
+        .save-btn { background: #007acc; color: white; border: none; padding: 12px 24px; border-radius: 3px; cursor: pointer; margin-top: 10px; font-size: 15px; }
+        .add-client-btn { background: #28a745; color: white; border: none; padding: 10px 18px; border-radius: 3px; cursor: pointer; margin-top: 10px; font-size: 14px; }
+        .remove-client-btn { background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; float: right; font-size: 13px; }
+        .warning-box { background: #dc3545; color: white; padding: 15px; margin: 15px 0; border-radius: 5px; border-left: 5px solid #a02a2a; font-size: 15px; }
+        h1 { font-size: 28px; }
+        h3 { font-size: 20px; }
+        select { font-size: 14px; }
     </style>
 </head>
 <body>
