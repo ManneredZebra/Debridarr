@@ -24,6 +24,8 @@ class MagnetHandler(FileSystemEventHandler):
         self.processing_files = set()
         self.download_progress = {}  # Track progress for each magnet file
         self.file_downloads = {}  # Track individual file downloads within torrents
+        self.retry_attempts = {}  # Track retry attempts for failed magnets
+        self.retry_cooldown = {}  # Track cooldown timestamps for retries
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -105,13 +107,34 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
             
             # Download all files from the torrent
+            hoster_unavailable = False
             for i, (download_link, filename) in enumerate(results):
                 # Check if download was aborted
                 if file_path not in self.processing_files:
                     logging.info(f"Download aborted, stopping file downloads: {file_path}")
                     break
+                if download_link == 'HOSTER_UNAVAILABLE':
+                    hoster_unavailable = True
+                    break
                 if download_link and filename:
                     self.download_file(download_link, filename, file_path, i)
+            
+            # Handle hoster unavailable
+            if hoster_unavailable:
+                self.retry_attempts[file_path] = self.retry_attempts.get(file_path, 0) + 1
+                if self.retry_attempts[file_path] >= 3:
+                    logging.error(f"Hoster unavailable after 3 attempts, removing magnet: {os.path.basename(file_path)}")
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+                    self.retry_attempts.pop(file_path, None)
+                    self.retry_cooldown.pop(file_path, None)
+                    return
+                else:
+                    logging.warning(f"Hoster unavailable, will retry in 10 minutes (attempt {self.retry_attempts[file_path]}/3): {os.path.basename(file_path)}")
+                    self.retry_cooldown[file_path] = time.time() + 600  # 10 minutes
+                    return
             
             self.delete_torrent(torrent_id)
             
@@ -338,6 +361,14 @@ class MagnetHandler(FileSystemEventHandler):
         response = requests.post(url, headers=headers, data=data)
         if response.status_code == 200:
             return response.json()['download']
+        elif response.status_code != 200:
+            try:
+                error_data = response.json()
+                if error_data.get('error_code') == 19:
+                    logging.error(f"Hoster unavailable for link (error 19): {link}")
+                    return 'HOSTER_UNAVAILABLE'
+            except:
+                pass
         return None
     
     def download_file(self, download_url, rd_filename=None, file_path=None, file_index=None):
@@ -478,6 +509,13 @@ def process_existing_magnets(magnets_folder, handler):
             if file_path in handler.processing_files:
                 logging.debug(f"Already processing: {filename}")
                 continue
+            
+            # Check if file is in cooldown
+            if file_path in handler.retry_cooldown:
+                if time.time() < handler.retry_cooldown[file_path]:
+                    continue
+                else:
+                    handler.retry_cooldown.pop(file_path, None)
                 
             if len(handler.processing_files) >= 3:
                 logging.debug(f"Maximum concurrent downloads reached (3), skipping: {filename}")

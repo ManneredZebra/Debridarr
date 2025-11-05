@@ -447,8 +447,8 @@ HTML_TEMPLATE = '''
     <div class="container">
         <div class="sidebar">
             <div style="display: flex; align-items: center; margin-bottom: 20px;">
-                <img src="/favicon.ico" width="32" height="32" style="margin-right: 10px;">
-                <h2 style="margin: 0;">Debridarr</h2>
+                <img src="/favicon.ico" width="64" height="64" style="margin-right: 15px;">
+                <h2 style="margin: 0; font-size: 32px;">Debridarr</h2>
             </div>
             <div class="nav-item active" onclick="showSection('overview')">Overview</div>
             <div class="nav-item" onclick="showSection('downloads')">Active Downloads</div>
