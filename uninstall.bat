@@ -19,6 +19,9 @@ wmic process where "name='Debridarr.exe'" delete 2>nul
 echo Waiting for processes to terminate...
 timeout /t 5 /nobreak >nul
 
+echo Removing Start Menu shortcut...
+if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Debridarr.lnk" del "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Debridarr.lnk"
+
 echo Removing application files...
 if exist "C:\Program Files\Debridarr" rmdir /s /q "C:\Program Files\Debridarr"
 if exist Debridarr.exe del Debridarr.exe

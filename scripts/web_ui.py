@@ -158,12 +158,18 @@ class WebUI:
                                 file_path = queued_file
                                 break
                     if file_path:
+                        # Delete torrent from Real-Debrid if it exists
+                        torrent_id = handler.torrent_ids.get(file_path)
+                        if torrent_id:
+                            handler.delete_torrent(torrent_id)
+                        
                         # Remove from tracking
                         handler.processing_files.discard(file_path)
                         if file_path in handler.queued_files:
                             handler.queued_files.remove(file_path)
                         handler.download_progress.pop(file_path, None)
                         handler.file_downloads.pop(file_path, None)
+                        handler.torrent_ids.pop(file_path, None)
                         
                         # Remove magnet file if it exists
                         try:
@@ -171,6 +177,9 @@ class WebUI:
                                 os.remove(file_path)
                         except:
                             pass
+                        
+                        # Process next queued item to free up slot
+                        handler._process_next_queued()
                         
                         return jsonify({'success': True, 'message': f'Aborted {filename}'})
             return jsonify({'success': False, 'message': 'Download not found'})
@@ -254,9 +263,14 @@ class WebUI:
                     return jsonify({'success': False, 'message': 'Client not found'})
                     
                 completed_magnets_folder = os.path.expandvars(client_config['completed_magnets_folder'])
+                failed_magnets_folder = os.path.expandvars(client_config.get('failed_magnets_folder', ''))
                 magnets_folder = os.path.expandvars(client_config['magnets_folder'])
                 
+                # Check both completed and failed folders
                 src_path = os.path.join(completed_magnets_folder, filename)
+                if not os.path.exists(src_path) and failed_magnets_folder:
+                    src_path = os.path.join(failed_magnets_folder, filename)
+                
                 dst_path = os.path.join(magnets_folder, filename)
                 
                 if os.path.exists(src_path):
@@ -280,6 +294,48 @@ class WebUI:
                     
                 completed_downloads_folder = os.path.expandvars(client_config['completed_downloads_folder'])
                 file_path = os.path.join(completed_downloads_folder, filename)
+                
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    return jsonify({'success': True, 'message': f'Deleted {filename}'})
+                else:
+                    return jsonify({'success': False, 'message': 'File not found'})
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)})
+        
+        @self.app.route('/api/failed')
+        def get_failed():
+            try:
+                with open(self.config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                failed = {}
+                for client_name, client_config in config.get('download_clients', {}).items():
+                    failed_magnets_folder = os.path.expandvars(client_config.get('failed_magnets_folder', ''))
+                    if failed_magnets_folder and os.path.exists(failed_magnets_folder):
+                        files = [f for f in os.listdir(failed_magnets_folder) if os.path.isfile(os.path.join(failed_magnets_folder, f))]
+                        failed[client_name] = files
+                    else:
+                        failed[client_name] = []
+                return jsonify(failed)
+            except:
+                return jsonify({})
+        
+        @self.app.route('/api/delete-failed/<client_name>/<path:filename>')
+        def delete_failed(client_name, filename):
+            try:
+                with open(self.config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                client_config = config.get('download_clients', {}).get(client_name)
+                if not client_config:
+                    return jsonify({'success': False, 'message': 'Client not found'})
+                    
+                failed_magnets_folder = os.path.expandvars(client_config.get('failed_magnets_folder', ''))
+                if not failed_magnets_folder:
+                    return jsonify({'success': False, 'message': 'Failed folder not configured'})
+                
+                file_path = os.path.join(failed_magnets_folder, filename)
                 
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -332,10 +388,10 @@ class WebUI:
                             except:
                                 pass
                 
-                # Clean in_progress and completed_downloads - remove all files not actively downloading
-                for folder_key in ['in_progress_folder', 'completed_downloads_folder']:
-                    folder_path = os.path.expandvars(client_config[folder_key])
-                    if os.path.exists(folder_path):
+                # Clean in_progress, completed_downloads, and failed_magnets - remove all files not actively downloading
+                for folder_key in ['in_progress_folder', 'completed_downloads_folder', 'failed_magnets_folder']:
+                    folder_path = os.path.expandvars(client_config.get(folder_key, ''))
+                    if folder_path and os.path.exists(folder_path):
                         for filename in os.listdir(folder_path):
                             # Only remove if NOT in active downloads
                             if filename not in active_files:
@@ -375,7 +431,8 @@ class WebUI:
                     counts[client_name] = {
                         'magnets': 0,
                         'in_progress': 0,
-                        'completed_downloads': 0
+                        'completed_downloads': 0,
+                        'failed_magnets': 0
                     }
                     
                     magnets_folder = os.path.expandvars(client_config['magnets_folder'])
@@ -389,6 +446,10 @@ class WebUI:
                     completed_downloads_folder = os.path.expandvars(client_config['completed_downloads_folder'])
                     if os.path.exists(completed_downloads_folder):
                         counts[client_name]['completed_downloads'] = len([f for f in os.listdir(completed_downloads_folder) if os.path.isfile(os.path.join(completed_downloads_folder, f))])
+                    
+                    failed_magnets_folder = os.path.expandvars(client_config.get('failed_magnets_folder', ''))
+                    if failed_magnets_folder and os.path.exists(failed_magnets_folder):
+                        counts[client_name]['failed_magnets'] = len([f for f in os.listdir(failed_magnets_folder) if os.path.isfile(os.path.join(failed_magnets_folder, f))])
                 
                 return jsonify(counts)
             except Exception as e:
@@ -521,6 +582,9 @@ HTML_TEMPLATE = '''
         .section { display: none; }
         .section.active { display: block; }
         .download-item { background: #2d2d2d; padding: 15px; margin: 10px 0; border-radius: 5px; font-size: 15px; }
+        .stat-card { flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center; }
+        .stat-value { font-size: 24px; font-weight: bold; }
+        .stat-label { font-size: 11px; color: #999; margin-top: 5px; }
         .abort-btn { background: #dc3545; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; font-size: 14px; }
         .retry-btn { background: #28a745; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; margin-right: 5px; font-size: 14px; }
         .delete-btn { background: #dc3545; color: white; border: none; padding: 8px 14px; border-radius: 3px; cursor: pointer; font-size: 14px; }
@@ -559,6 +623,7 @@ HTML_TEMPLATE = '''
             <div class="nav-item active" onclick="showSection('overview')">Overview</div>
             <div class="nav-item" onclick="showSection('downloads')">Active Downloads</div>
             <div class="nav-item" onclick="showSection('history')">History</div>
+            <div class="nav-item" onclick="showSection('failed')">Failed Downloads</div>
             <div class="nav-item" onclick="showSection('debrid-downloads')">Debrid Downloads</div>
             <div class="nav-item" onclick="showSection('completed')">Completed Downloads</div>
             <div class="nav-item" onclick="showSection('logs')">Logs</div>
@@ -587,6 +652,10 @@ HTML_TEMPLATE = '''
                 </div>
                 <div id="history-list"></div>
                 <div id="history-pagination" style="margin: 20px 0; text-align: center;"></div>
+            </div>
+            <div id="failed" class="section">
+                <h1>Failed Downloads</h1>
+                <div id="failed-list"></div>
             </div>
             <div id="debrid-downloads" class="section">
                 <h1>Debrid Downloads</h1>
@@ -653,6 +722,7 @@ HTML_TEMPLATE = '''
             
             if (section === 'logs') loadLogs();
             if (section === 'history') loadHistory(1);
+            if (section === 'failed') loadFailed();
             if (section === 'debrid-downloads') loadDebridDownloads();
             if (section === 'completed') loadCompleted();
             if (section === 'settings') loadSettings();
@@ -719,13 +789,28 @@ HTML_TEMPLATE = '''
                         const clientCounts = counts[client] || {magnets: 0, in_progress: 0, completed_downloads: 0};
                         
                         card.innerHTML = `
-                            <h3>${client.toUpperCase()}</h3>
-                            <p class="${statusClass}">Active Downloads: ${status.active_downloads}</p>
-                            <div style="font-size: 11px; color: #999; margin: 5px 0;">Folder File Counts:</div>
-                            <div style="font-size: 12px; color: #ccc; margin: 10px 0;">
-                                <div>Magnets: ${clientCounts.magnets}</div>
-                                <div>In Progress: ${clientCounts.in_progress}</div>
-                                <div>Completed: ${clientCounts.completed_downloads}</div>
+                            <h3 style="margin-bottom: 15px;">${client.toUpperCase()}</h3>
+                            <div style="display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap;">
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${status.active_downloads}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Active</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #007acc;">${clientCounts.magnets}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Magnets</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #17a2b8;">${clientCounts.in_progress}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">In Progress</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #28a745;">${clientCounts.completed_downloads}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Completed</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #dc3545;">${clientCounts.failed_magnets || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Failed</div>
+                                </div>
                             </div>
                         `;
                         
@@ -1005,6 +1090,57 @@ HTML_TEMPLATE = '''
                     .then(data => {
                         alert(data.message);
                         loadHistory();
+                        loadFailed();
+                    });
+            }
+        }
+
+        function loadFailed() {
+            fetch('/api/failed')
+                .then(r => r.json())
+                .then(data => {
+                    const failedList = document.getElementById('failed-list');
+                    failedList.innerHTML = '';
+                    
+                    Object.entries(data).forEach(([client, files]) => {
+                        files.forEach(file => {
+                            const item = document.createElement('div');
+                            item.className = 'download-item';
+                            
+                            const label = document.createElement('span');
+                            label.innerHTML = `<strong>${client.toUpperCase()}</strong>: ${file} `;
+                            
+                            const retryBtn = document.createElement('button');
+                            retryBtn.className = 'retry-btn';
+                            retryBtn.textContent = 'Retry';
+                            retryBtn.onclick = function() { retryDownload(client, file); };
+                            
+                            const deleteBtn = document.createElement('button');
+                            deleteBtn.className = 'delete-btn';
+                            deleteBtn.textContent = 'Remove';
+                            deleteBtn.onclick = function() { deleteFailed(client, file); };
+                            
+                            item.appendChild(label);
+                            item.appendChild(retryBtn);
+                            item.appendChild(deleteBtn);
+                            failedList.appendChild(item);
+                        });
+                    });
+                    
+                    if (failedList.innerHTML === '') {
+                        failedList.innerHTML = '<div class="download-item">No failed downloads</div>';
+                    }
+                })
+                .catch(err => console.error('loadFailed error:', err));
+        }
+
+        function deleteFailed(client, filename) {
+            if (confirm(`Are you sure you want to remove ${filename}?`)) {
+                fetch(`/api/delete-failed/${client}/${filename}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        alert(data.message);
+                        loadFailed();
                     });
             }
         }
@@ -1024,7 +1160,8 @@ HTML_TEMPLATE = '''
             const message = `Clean Up will remove all leftover files from:\n\n` +
                 `- Magnets folder (unprocessed .magnet files)\n` +
                 `- In Progress folder (incomplete downloads)\n` +
-                `- Completed Downloads folder (old video files)\n\n` +
+                `- Completed Downloads folder (old video files)\n` +
+                `- Failed Magnets folder (failed .magnet files)\n\n` +
                 `Active downloads will NOT be affected.\n\n` +
                 `Continue with cleanup for ${client.toUpperCase()}?`;
             
@@ -1135,6 +1272,10 @@ HTML_TEMPLATE = '''
                                 <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${clientConfig.completed_downloads_folder}">
                             </div>
                             <div class="form-row">
+                                <label>Failed Magnets Folder:</label>
+                                <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${clientConfig.failed_magnets_folder || ''}">
+                            </div>
+                            <div class="form-row">
                                 <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="${clientConfig.arr_url || ''}" placeholder="http://localhost:8989 or http://localhost:7878">
                             </div>
@@ -1233,6 +1374,10 @@ HTML_TEMPLATE = '''
                 <div class="form-row">
                     <label>Completed Downloads Folder:</label>
                     <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${baseDir}/completed_downloads">
+                </div>
+                <div class="form-row">
+                    <label>Failed Magnets Folder:</label>
+                    <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${baseDir}/failed_magnets">
                 </div>
                 <div class="form-row">
                     <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
@@ -1441,12 +1586,13 @@ HTML_TEMPLATE = '''
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         document.getElementById(savedTab).classList.add('active');
         const navItems = document.querySelectorAll('.nav-item');
-        const sections = ['overview', 'downloads', 'history', 'debrid-downloads', 'completed', 'logs', 'settings'];
+        const sections = ['overview', 'downloads', 'history', 'failed', 'debrid-downloads', 'completed', 'logs', 'settings'];
         const index = sections.indexOf(savedTab);
         if (index >= 0) navItems[index].classList.add('active');
         
         if (savedTab === 'logs') loadLogs();
         if (savedTab === 'history') loadHistory(1);
+        if (savedTab === 'failed') loadFailed();
         if (savedTab === 'debrid-downloads') loadDebridDownloads();
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();

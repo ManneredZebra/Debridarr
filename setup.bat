@@ -43,6 +43,9 @@ if errorlevel 1 (
 )
 del Debridarr.exe
 
+echo Creating Start Menu shortcut...
+powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%ProgramData%\Microsoft\Windows\Start Menu\Programs\Debridarr.lnk'); $Shortcut.TargetPath = '%INSTALL_DIR%\bin\Debridarr.exe'; $Shortcut.IconLocation = '%INSTALL_DIR%\icon.png'; $Shortcut.Save()" >nul 2>&1
+
 echo Creating data folders...
 set CONTENT_DIR=C:\ProgramData\Debridarr
 mkdir "%CONTENT_DIR%" 2>nul
@@ -51,10 +54,12 @@ mkdir "%CONTENT_DIR%\sonarr\magnets" 2>nul
 mkdir "%CONTENT_DIR%\sonarr\in_progress" 2>nul
 mkdir "%CONTENT_DIR%\sonarr\completed_magnets" 2>nul
 mkdir "%CONTENT_DIR%\sonarr\completed_downloads" 2>nul
+mkdir "%CONTENT_DIR%\sonarr\failed_magnets" 2>nul
 mkdir "%CONTENT_DIR%\radarr\magnets" 2>nul
 mkdir "%CONTENT_DIR%\radarr\in_progress" 2>nul
 mkdir "%CONTENT_DIR%\radarr\completed_magnets" 2>nul
 mkdir "%CONTENT_DIR%\radarr\completed_downloads" 2>nul
+mkdir "%CONTENT_DIR%\radarr\failed_magnets" 2>nul
 
 echo Creating config file...
 if not exist "%CONTENT_DIR%\config.yaml" (

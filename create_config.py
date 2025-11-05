@@ -11,13 +11,15 @@ config = {
             'magnets_folder': os.path.join(content_dir, 'sonarr', 'magnets'),
             'in_progress_folder': os.path.join(content_dir, 'sonarr', 'in_progress'),
             'completed_magnets_folder': os.path.join(content_dir, 'sonarr', 'completed_magnets'),
-            'completed_downloads_folder': os.path.join(content_dir, 'sonarr', 'completed_downloads')
+            'completed_downloads_folder': os.path.join(content_dir, 'sonarr', 'completed_downloads'),
+            'failed_magnets_folder': os.path.join(content_dir, 'sonarr', 'failed_magnets')
         },
         'radarr': {
             'magnets_folder': os.path.join(content_dir, 'radarr', 'magnets'),
             'in_progress_folder': os.path.join(content_dir, 'radarr', 'in_progress'),
             'completed_magnets_folder': os.path.join(content_dir, 'radarr', 'completed_magnets'),
-            'completed_downloads_folder': os.path.join(content_dir, 'radarr', 'completed_downloads')
+            'completed_downloads_folder': os.path.join(content_dir, 'radarr', 'completed_downloads'),
+            'failed_magnets_folder': os.path.join(content_dir, 'radarr', 'failed_magnets')
         }
     }
 }

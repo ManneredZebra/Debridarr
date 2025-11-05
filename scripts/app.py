@@ -15,12 +15,13 @@ from logging.handlers import RotatingFileHandler
 from web_ui import WebUI
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, performance_mode='medium', client_name=''):
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode='medium', client_name=''):
         self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
         self.completed_magnets_folder = completed_magnets_folder
         self.in_progress_folder = in_progress_folder
+        self.failed_magnets_folder = failed_magnets_folder
         self.client_name = client_name
         
         # Set performance parameters
@@ -40,6 +41,7 @@ class MagnetHandler(FileSystemEventHandler):
         self.file_downloads = {}  # Track individual file downloads within torrents
         self.retry_attempts = {}  # Track retry attempts for failed magnets
         self.retry_cooldown = {}  # Track cooldown timestamps for retries
+        self.torrent_ids = {}  # Track torrent IDs for each magnet file
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -68,6 +70,7 @@ class MagnetHandler(FileSystemEventHandler):
             self.processing_files.discard(file_path)
             self.download_progress.pop(file_path, None)
             self.file_downloads.pop(file_path, None)
+            self.torrent_ids.pop(file_path, None)
             self._process_next_queued()
     
     def process_magnet(self, file_path):
@@ -96,22 +99,27 @@ class MagnetHandler(FileSystemEventHandler):
             if not torrent_id:
                 return
             if torrent_id == 'FAILED':
-                # Report failure and delete magnet file
+                # Report failure and move magnet to failed folder
                 self.report_failure_to_arr(filename)
                 try:
-                    os.remove(file_path)
-                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                    os.makedirs(self.failed_magnets_folder, exist_ok=True)
+                    os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
+                    logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
                 return
+            
+            # Store torrent ID for abort handling
+            self.torrent_ids[file_path] = torrent_id
             
             self.download_progress[file_path] = {'status': 'Selecting files', 'progress': 20, 'cache_progress': 10, 'download_progress': 0}
             if not self.select_files(torrent_id):
                 self.delete_torrent(torrent_id)
                 self.report_failure_to_arr(filename)
                 try:
-                    os.remove(file_path)
-                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                    os.makedirs(self.failed_magnets_folder, exist_ok=True)
+                    os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
+                    logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
                 return
@@ -122,8 +130,9 @@ class MagnetHandler(FileSystemEventHandler):
                 self.delete_torrent(torrent_id)
                 self.report_failure_to_arr(filename)
                 try:
-                    os.remove(file_path)
-                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                    os.makedirs(self.failed_magnets_folder, exist_ok=True)
+                    os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
+                    logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
                 return
@@ -145,6 +154,7 @@ class MagnetHandler(FileSystemEventHandler):
                 # Check if download was aborted
                 if file_path not in self.processing_files:
                     logging.info(f"Download aborted, stopping file downloads: {file_path}")
+                    self.delete_torrent(torrent_id)
                     break
                 if download_link == 'HOSTER_UNAVAILABLE':
                     hoster_unavailable = True
@@ -156,9 +166,10 @@ class MagnetHandler(FileSystemEventHandler):
             if hoster_unavailable:
                 self.retry_attempts[file_path] = self.retry_attempts.get(file_path, 0) + 1
                 if self.retry_attempts[file_path] >= 3:
-                    logging.error(f"Hoster unavailable after 3 attempts, removing magnet: {os.path.basename(file_path)}")
+                    logging.error(f"Hoster unavailable after 3 attempts, moving to failed: {os.path.basename(file_path)}")
                     try:
-                        os.remove(file_path)
+                        os.makedirs(self.failed_magnets_folder, exist_ok=True)
+                        os.rename(file_path, os.path.join(self.failed_magnets_folder, os.path.basename(file_path)))
                     except:
                         pass
                     self.retry_attempts.pop(file_path, None)
@@ -323,6 +334,22 @@ class MagnetHandler(FileSystemEventHandler):
         logging.info(f"Waiting for torrent to complete: {torrent_id}")
         for attempt in range(60):
             response = requests.get(url, headers=headers)
+            if response.status_code == 404:
+                # Torrent was deleted from Real-Debrid, re-add it
+                logging.warning(f"Torrent {torrent_id} not found in Real-Debrid, re-adding...")
+                if file_path:
+                    try:
+                        with open(file_path, 'r') as f:
+                            magnet_link = f.read().strip()
+                        new_torrent_id = self.add_torrent(magnet_link)
+                        if new_torrent_id and new_torrent_id != 'FAILED':
+                            self.torrent_ids[file_path] = new_torrent_id
+                            if not self.select_files(new_torrent_id):
+                                return None
+                            return self.wait_for_torrent(new_torrent_id, file_path)
+                    except:
+                        pass
+                return None
             if response.status_code == 200:
                 data = response.json()
                 status = data.get('status', 'unknown')
@@ -661,18 +688,20 @@ def setup_handlers(config_path, observer):
         in_progress_folder = os.path.expandvars(client_config['in_progress_folder'])
         completed_magnets_folder = os.path.expandvars(client_config['completed_magnets_folder'])
         completed_downloads_folder = os.path.expandvars(client_config['completed_downloads_folder'])
+        failed_magnets_folder = os.path.expandvars(client_config.get('failed_magnets_folder', os.path.join(os.path.dirname(magnets_folder), 'failed_magnets')))
         
         # Create directories
         os.makedirs(magnets_folder, exist_ok=True)
         os.makedirs(in_progress_folder, exist_ok=True)
         os.makedirs(completed_magnets_folder, exist_ok=True)
         os.makedirs(completed_downloads_folder, exist_ok=True)
+        os.makedirs(failed_magnets_folder, exist_ok=True)
         
         # Get performance mode
         performance_mode = config.get('performance_mode', 'medium')
         
         # Create handler
-        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, performance_mode, client_name)
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name)
         handlers.append((client_name, handler, magnets_folder))
         
         # Schedule observer
@@ -688,6 +717,62 @@ class DebridDownloadsManager:
         self.db_path = os.path.join(base_dir, 'debrid_downloads.json')
         self.downloads = self.load_downloads()
         self.download_progress = {}
+    
+    def extract_media_info(self, filename):
+        """Extract title, season, episode from filename"""
+        import re
+        # Remove extension and common separators
+        name = os.path.splitext(filename)[0].lower()
+        name = re.sub(r'[._-]', ' ', name)
+        
+        # Extract season/episode patterns (S01E01, 1x01, etc)
+        season_ep = re.search(r's(\d+)\s*e(\d+)', name, re.I)
+        if not season_ep:
+            season_ep = re.search(r'(\d+)x(\d+)', name)
+        
+        # Extract year
+        year = re.search(r'(19\d{2}|20\d{2})', name)
+        
+        # Remove quality/codec info
+        name = re.sub(r'\b(1080p|720p|2160p|4k|x264|x265|hevc|bluray|webrip|web dl|hdtv|proper|repack)\b.*', '', name, flags=re.I)
+        
+        # Clean up title
+        title = name.strip()
+        
+        return {
+            'title': title,
+            'season': season_ep.group(1) if season_ep else None,
+            'episode': season_ep.group(2) if season_ep else None,
+            'year': year.group(1) if year else None
+        }
+    
+    def smart_match(self, rd_filename, media_files):
+        """Smart matching for renamed files"""
+        rd_info = self.extract_media_info(rd_filename)
+        
+        for media_file in media_files:
+            media_info = self.extract_media_info(media_file)
+            
+            # Check if titles match (fuzzy)
+            rd_words = set(rd_info['title'].split())
+            media_words = set(media_info['title'].split())
+            common_words = rd_words & media_words
+            
+            # Require at least 50% word overlap for title match
+            if len(common_words) >= max(len(rd_words), len(media_words)) * 0.5:
+                # For TV shows, match season/episode
+                if rd_info['season'] and rd_info['episode']:
+                    if rd_info['season'] == media_info['season'] and rd_info['episode'] == media_info['episode']:
+                        return True
+                # For movies, match year if available
+                elif rd_info['year']:
+                    if rd_info['year'] == media_info['year']:
+                        return True
+                # If no season/episode/year, strong title match is enough
+                elif len(common_words) >= max(len(rd_words), len(media_words)) * 0.7:
+                    return True
+        
+        return False
         
     def load_downloads(self):
         if os.path.exists(self.db_path):
@@ -731,22 +816,28 @@ class DebridDownloadsManager:
             
             # Check media directory if configured
             media_root = config.get('media_root_directory', '')
-            media_files = set()
+            media_files = []
             if media_root and os.path.exists(media_root):
                 for root, dirs, files in os.walk(media_root):
-                    media_files.update(files)
+                    media_files.extend(files)
             
-            # Process downloads
+            # Process downloads (deduplicate by filename)
             new_downloads = []
+            seen_filenames = set()
             for item in rd_downloads:
                 filename = item.get('filename', '')
                 file_id = item.get('id', '')
                 
-                # Determine status
+                # Skip duplicates
+                if filename in seen_filenames:
+                    continue
+                seen_filenames.add(filename)
+                
+                # Determine status with smart matching
                 status = 'Not Downloaded'
                 if filename in manual_files:
                     status = 'Already in Manual Downloads'
-                elif media_root and filename in media_files:
+                elif media_root and (filename in media_files or self.smart_match(filename, media_files)):
                     status = 'Already in Media Library'
                 elif not media_root:
                     status = 'Unknown'
