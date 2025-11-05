@@ -87,8 +87,22 @@ The Web UI is accessible at **http://127.0.0.1:3636** and provides:
 - **Abort** button at top of each download to immediately cancel and stop all queued files
 
 ### History Tab
-- View completed magnet files
+- View completed magnet files with sorting and pagination
 - **Retry** button to reprocess failed downloads
+- Sort by date or name
+- 50 items per page
+
+### Debrid Downloads Tab
+- View and manage your complete Real-Debrid download history
+- **Sync Debrid Downloads** button to manually fetch history from Real-Debrid
+- Search across all synced downloads with flexible matching
+- Sort by date, name, or size
+- Filter by status: Not Downloaded, Already in Manual Downloads, Already in Media Library, Unknown
+- **Download** button to manually download files to your manual downloads folder
+- Real-time progress tracking for manual downloads
+- Automatic status detection based on manual downloads folder and media library
+- Configurable sync limit (up to 2500 downloads)
+- 50 items per page with pagination
 
 ### Completed Downloads Tab
 - View all downloaded video files
@@ -104,6 +118,9 @@ The Web UI is accessible at **http://127.0.0.1:3636** and provides:
 - Manage download clients (Sonarr, Radarr, etc.)
 - Add/remove custom download clients
 - Edit folder paths for each client
+- Configure manual downloads folder (for Debrid Downloads tab)
+- Set optional media root directory for automatic file detection
+- Set Debrid sync limit (default 100, max 2500)
 - Changes apply immediately without restart
 
 ## Usage
@@ -168,10 +185,13 @@ Debridarr/
 └── uninstall.bat        # Uninstall script
 ```
 
-## Logs
+## Data Storage
 
-Logs can be viewed in the **Logs** tab of the Web UI or directly at:
-`C:\ProgramData\Debridarr\logs\debridarr.log`
+- **Configuration**: `C:\ProgramData\Debridarr\config.yaml`
+- **Logs**: `C:\ProgramData\Debridarr\logs\debridarr.log` (viewable in Logs tab)
+- **Debrid Downloads Database**: `C:\ProgramData\Debridarr\debrid_downloads.json`
+- **Application**: `C:\Program Files\Debridarr\bin\Debridarr.exe`
+- **Content Folders**: `C:\ProgramData\Debridarr\[client]\*`
 
 ## System Health Monitoring
 
@@ -184,6 +204,36 @@ Debridarr automatically monitors system health and displays warnings on the Over
 
 Each warning includes specific guidance on how to resolve the issue.
 
+## Manual Downloads
+
+The **Debrid Downloads** tab allows you to:
+
+1. **Sync your Real-Debrid history**: Click "Sync Debrid Downloads" to fetch your download history
+2. **Search and filter**: Find specific downloads with flexible search (e.g., "daniel tiger" matches "daniel.tiger.s01e01")
+3. **Check status automatically**:
+   - **Already in Manual Downloads**: File exists in your manual downloads folder
+   - **Already in Media Library**: File found in your configured media root directory
+   - **Not Downloaded**: File not found locally
+   - **Unknown**: Media root directory not configured
+4. **Download manually**: Click "Download" button to download files to your manual downloads folder
+5. **Track progress**: Real-time progress bars show download status
+
+### Configuration
+
+- **Manual Downloads Folder**: Where manual downloads are saved (default: `~/Downloads/Debridarr_Manual`)
+- **Media Root Directory**: Optional path to your media library for automatic file detection (e.g., `D:/Media`)
+- **Debrid Sync Limit**: Number of downloads to fetch from Real-Debrid (default 100, max 2500)
+
+## Seamless Updates
+
+Running `setup.bat` when Debridarr is already installed will:
+- Automatically close the running application
+- Update to the latest version
+- Restart the application automatically
+- Preserve all your settings and data
+
+No need to manually close the app before updating!
+
 ## Troubleshooting
 
 - Access the Web UI at http://127.0.0.1:3636 to monitor downloads
@@ -195,3 +245,4 @@ Each warning includes specific guidance on how to resolve the issue.
 - Run setup.bat as Administrator if needed
 - Ensure Sonarr/Radarr can write to the configured magnet folders
 - User data in `C:\ProgramData\Debridarr` is preserved during uninstall
+- For manual downloads, ensure the unrestrict link API call succeeds (check Logs tab)

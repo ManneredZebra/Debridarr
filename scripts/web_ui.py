@@ -9,9 +9,10 @@ from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime
 
 class WebUI:
-    def __init__(self, config_path, handlers, reload_callback=None):
+    def __init__(self, config_path, handlers, debrid_manager=None, reload_callback=None):
         self.config_path = config_path
         self.handlers = handlers
+        self.debrid_manager = debrid_manager
         self.reload_callback = reload_callback
         self.app = Flask(__name__)
         self.setup_routes()
@@ -51,11 +52,25 @@ class WebUI:
                     file_downloads = handler.file_downloads.get(file_path, [])
                     downloads.append({
                         'filename': filename,
+                        'filepath': file_path,
                         'status': progress_info['status'],
                         'progress': progress_info['progress'],
                         'cache_progress': progress_info.get('cache_progress', 0),
                         'files_progress': progress_info.get('files_progress', 0),
-                        'files': file_downloads
+                        'files': file_downloads,
+                        'queued': False
+                    })
+                for file_path in handler.queued_files:
+                    filename = os.path.basename(file_path)
+                    downloads.append({
+                        'filename': filename,
+                        'filepath': file_path,
+                        'status': 'Queued',
+                        'progress': 0,
+                        'cache_progress': 0,
+                        'files_progress': 0,
+                        'files': [],
+                        'queued': True
                     })
                 status[client_name] = {
                     'active_downloads': len(handler.processing_files),
@@ -137,9 +152,16 @@ class WebUI:
                         if filename in processing_file:
                             file_path = processing_file
                             break
+                    if not file_path:
+                        for queued_file in handler.queued_files:
+                            if filename in queued_file:
+                                file_path = queued_file
+                                break
                     if file_path:
                         # Remove from tracking
                         handler.processing_files.discard(file_path)
+                        if file_path in handler.queued_files:
+                            handler.queued_files.remove(file_path)
                         handler.download_progress.pop(file_path, None)
                         handler.file_downloads.pop(file_path, None)
                         
@@ -396,6 +418,86 @@ class WebUI:
                 return jsonify({'success': True, 'message': 'Configuration saved successfully.', 'recheck': True})
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e), 'recheck': False})
+        
+        @self.app.route('/api/debrid-downloads/sync', methods=['POST'])
+        def sync_debrid_downloads():
+            if self.debrid_manager:
+                result = self.debrid_manager.sync_from_api()
+                return jsonify(result)
+            return jsonify({'success': False, 'message': 'Manager not available'})
+        
+        @self.app.route('/api/debrid-downloads')
+        def get_debrid_downloads():
+            if self.debrid_manager:
+                search = request.args.get('search', '')
+                sort_by = request.args.get('sort', 'date_desc')
+                status_filter = request.args.get('status', 'all')
+                page = int(request.args.get('page', 1))
+                per_page = 50
+                
+                downloads = self.debrid_manager.get_downloads(search, sort_by, status_filter)
+                total = len(downloads)
+                start = (page - 1) * per_page
+                end = start + per_page
+                paginated = downloads[start:end]
+                
+                return jsonify({
+                    'downloads': paginated, 
+                    'total': total,
+                    'page': page,
+                    'per_page': per_page,
+                    'total_pages': (total + per_page - 1) // per_page,
+                    'progress': self.debrid_manager.download_progress
+                })
+            return jsonify({'downloads': [], 'total': 0, 'page': 1, 'per_page': 50, 'total_pages': 0, 'progress': {}})
+        
+        @self.app.route('/api/debrid-downloads/download/<file_id>', methods=['POST'])
+        def download_debrid_file(file_id):
+            if self.debrid_manager:
+                result = self.debrid_manager.download_file(file_id)
+                return jsonify(result)
+            return jsonify({'success': False, 'message': 'Manager not available'})
+        
+        @self.app.route('/api/queue/move/<client_name>/<direction>/<path:filename>')
+        def move_queue(client_name, direction, filename):
+            for name, handler, _ in self.handlers:
+                if name == client_name:
+                    file_path = None
+                    for queued_file in handler.queued_files:
+                        if filename in queued_file:
+                            file_path = queued_file
+                            break
+                    if file_path:
+                        if handler.move_queue_item(file_path, direction):
+                            return jsonify({'success': True})
+                        return jsonify({'success': False, 'message': 'Cannot move in that direction'})
+            return jsonify({'success': False, 'message': 'Item not found in queue'})
+        
+        @self.app.route('/api/test-arr', methods=['POST'])
+        def test_arr_connection():
+            try:
+                data = request.json
+                arr_url = data.get('url', '').rstrip('/')
+                arr_api_key = data.get('api_key', '')
+                
+                if not arr_url or not arr_api_key:
+                    return jsonify({'success': False, 'message': 'URL and API key required'})
+                
+                headers = {'X-Api-Key': arr_api_key}
+                response = requests.get(f'{arr_url}/api/v3/system/status', headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    app_name = response.json().get('appName', 'Unknown')
+                    version = response.json().get('version', 'Unknown')
+                    return jsonify({'success': True, 'message': f'Connected to {app_name} v{version}'})
+                elif response.status_code == 401:
+                    return jsonify({'success': False, 'message': 'Invalid API key'})
+                else:
+                    return jsonify({'success': False, 'message': f'Connection failed: {response.status_code}'})
+            except requests.RequestException as e:
+                return jsonify({'success': False, 'message': f'Connection error: {str(e)}'})
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)})
     
     def run(self):
         import logging
@@ -457,6 +559,7 @@ HTML_TEMPLATE = '''
             <div class="nav-item active" onclick="showSection('overview')">Overview</div>
             <div class="nav-item" onclick="showSection('downloads')">Active Downloads</div>
             <div class="nav-item" onclick="showSection('history')">History</div>
+            <div class="nav-item" onclick="showSection('debrid-downloads')">Debrid Downloads</div>
             <div class="nav-item" onclick="showSection('completed')">Completed Downloads</div>
             <div class="nav-item" onclick="showSection('logs')">Logs</div>
             <div class="nav-item" onclick="showSection('settings')" id="settings-nav">Settings <span id="settings-warning" style="display: none; color: #ffc107; margin-left: 5px;">⚠</span></div>
@@ -484,6 +587,39 @@ HTML_TEMPLATE = '''
                 </div>
                 <div id="history-list"></div>
                 <div id="history-pagination" style="margin: 20px 0; text-align: center;"></div>
+            </div>
+            <div id="debrid-downloads" class="section">
+                <h1>Debrid Downloads</h1>
+                <button class="save-btn" onclick="syncDebridDownloads()" style="margin-bottom: 15px;">Sync Debrid Downloads</button>
+                <div style="margin: 15px 0; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <div>
+                        <label style="color: #ccc; margin-right: 5px;">Search:</label>
+                        <input type="text" id="debrid-search" placeholder="Search filename..." style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px; font-size: 14px;">
+                    </div>
+                    <div>
+                        <label style="color: #ccc; margin-right: 5px;">Sort by:</label>
+                        <select id="debrid-sort" style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px; font-size: 14px;">
+                            <option value="date_desc">Date (Newest First)</option>
+                            <option value="date_asc">Date (Oldest First)</option>
+                            <option value="name_asc">Name (A-Z)</option>
+                            <option value="name_desc">Name (Z-A)</option>
+                            <option value="size_desc">Size (Largest First)</option>
+                            <option value="size_asc">Size (Smallest First)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="color: #ccc; margin-right: 5px;">Status:</label>
+                        <select id="debrid-status" style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px; font-size: 14px;">
+                            <option value="all">All</option>
+                            <option value="Not Downloaded">Not Downloaded</option>
+                            <option value="Already in Manual Downloads">Already in Manual Downloads</option>
+                            <option value="Already in Media Library">Already in Media Library</option>
+                            <option value="Unknown">Unknown</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="debrid-list"></div>
+                <div id="debrid-pagination" style="margin: 20px 0; text-align: center;"></div>
             </div>
             <div id="completed" class="section">
                 <h1>Completed Downloads</h1>
@@ -517,6 +653,7 @@ HTML_TEMPLATE = '''
             
             if (section === 'logs') loadLogs();
             if (section === 'history') loadHistory(1);
+            if (section === 'debrid-downloads') loadDebridDownloads();
             if (section === 'completed') loadCompleted();
             if (section === 'settings') loadSettings();
         }
@@ -614,18 +751,44 @@ HTML_TEMPLATE = '''
                             const item = document.createElement('div');
                             item.className = 'download-item';
                             
-                            // Add abort button at top
+                            if (download.queued) {
+                                item.style.opacity = '0.7';
+                                item.style.border = '1px dashed #666';
+                            }
+                            
+                            // Add buttons at top
+                            const btnContainer = document.createElement('div');
+                            btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
+                            
+                            if (download.queued) {
+                                const upBtn = document.createElement('button');
+                                upBtn.className = 'retry-btn';
+                                upBtn.textContent = '↑';
+                                upBtn.style.padding = '4px 10px';
+                                upBtn.onclick = function() { moveQueue(client, 'up', download.filename); };
+                                btnContainer.appendChild(upBtn);
+                                
+                                const downBtn = document.createElement('button');
+                                downBtn.className = 'retry-btn';
+                                downBtn.textContent = '↓';
+                                downBtn.style.padding = '4px 10px';
+                                downBtn.onclick = function() { moveQueue(client, 'down', download.filename); };
+                                btnContainer.appendChild(downBtn);
+                            }
+                            
                             const abortBtn = document.createElement('button');
                             abortBtn.className = 'abort-btn';
-                            abortBtn.textContent = 'Abort';
-                            abortBtn.style.float = 'right';
+                            abortBtn.textContent = download.queued ? 'Remove' : 'Abort';
                             abortBtn.onclick = function() { abortDownload(client, download.filename); };
-                            item.appendChild(abortBtn);
+                            btnContainer.appendChild(abortBtn);
+                            
+                            item.appendChild(btnContainer);
                             
                             const contentDiv = document.createElement('div');
                             contentDiv.innerHTML = `
                                 <strong>${client.toUpperCase()}</strong>: ${download.filename}
-                                <div>${download.status}</div>
+                                <div>${download.queued ? '<span style="color: #ffc107;">⏳ Queued</span>' : download.status}</div>
+                                ${!download.queued ? `
                                 <div class="progress-container">
                                     <div style="flex: 1;">
                                         <div class="progress-label">Real-Debrid Cache</div>
@@ -641,12 +804,12 @@ HTML_TEMPLATE = '''
                                             <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
                                         </div>
                                     </div>
-                                </div>
+                                </div>` : ''}
                             `;
                             item.appendChild(contentDiv);
                             
-                            // Add individual file progress bars if files exist
-                            if (download.files && download.files.length > 0) {
+                            // Add individual file progress bars if files exist and not queued
+                            if (!download.queued && download.files && download.files.length > 0) {
                                 const filesDiv = document.createElement('div');
                                 filesDiv.style.marginTop = '10px';
                                 filesDiv.innerHTML = '<strong>Individual Files:</strong>';
@@ -898,6 +1061,48 @@ HTML_TEMPLATE = '''
                     `;
                     settingsContent.appendChild(apiGroup);
                     
+                    // Manual downloads settings
+                    const manualGroup = document.createElement('div');
+                    manualGroup.className = 'settings-group';
+                    manualGroup.innerHTML = `
+                        <h3>Manual Downloads Settings</h3>
+                        <div class="form-row">
+                            <label>Manual Downloads Folder:</label>
+                            <input type="text" id="manual-downloads-folder" value="${config.manual_downloads_folder || ''}" placeholder="Leave empty for default Downloads folder">
+                        </div>
+                        <div class="form-row">
+                            <label>Media Root Directory (Optional):</label>
+                            <input type="text" id="media-root-directory" value="${config.media_root_directory || ''}" placeholder="e.g., D:/Media - Used to check if files already exist">
+                        </div>
+                        <div class="form-row">
+                            <label>Debrid Sync Limit:</label>
+                            <input type="number" id="debrid-sync-limit" value="${config.debrid_sync_limit || 100}" placeholder="100" min="1" max="2500">
+                        </div>
+                    `;
+                    settingsContent.appendChild(manualGroup);
+                    
+                    // Performance settings
+                    const perfGroup = document.createElement('div');
+                    perfGroup.className = 'settings-group';
+                    perfGroup.innerHTML = `
+                        <h3>Performance Mode</h3>
+                        <div class="form-row">
+                            <label>Performance Mode:</label>
+                            <select id="performance-mode" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;">
+                                <option value="low" ${config.performance_mode === 'low' ? 'selected' : ''}>Low</option>
+                                <option value="medium" ${!config.performance_mode || config.performance_mode === 'medium' ? 'selected' : ''}>Medium (Default)</option>
+                                <option value="high" ${config.performance_mode === 'high' ? 'selected' : ''}>High</option>
+                            </select>
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">
+                                <strong>Low:</strong> 1 concurrent download, minimal resource usage<br>
+                                <strong>Medium:</strong> 2 concurrent downloads, balanced performance<br>
+                                <strong>High:</strong> 4 concurrent downloads, faster processing but higher CPU/network usage<br><br>
+                                Higher modes download faster but may affect your computer's performance during active downloads.
+                            </div>
+                        </div>
+                    `;
+                    settingsContent.appendChild(perfGroup);
+                    
                     // Download clients section
                     const clientsGroup = document.createElement('div');
                     clientsGroup.className = 'settings-group';
@@ -929,6 +1134,15 @@ HTML_TEMPLATE = '''
                                 <label>Completed Downloads Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${clientConfig.completed_downloads_folder}">
                             </div>
+                            <div class="form-row">
+                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
+                                <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="${clientConfig.arr_url || ''}" placeholder="http://localhost:8989 or http://localhost:7878">
+                            </div>
+                            <div class="form-row">
+                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
+                                <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="${clientConfig.arr_api_key || ''}" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
+                                <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
+                            </div>
                         `;
                         clientsDiv.appendChild(clientDiv);
                     });
@@ -956,6 +1170,10 @@ HTML_TEMPLATE = '''
         function saveSettings() {
             const config = {
                 real_debrid_api_token: document.getElementById('api-token').value,
+                manual_downloads_folder: document.getElementById('manual-downloads-folder').value,
+                media_root_directory: document.getElementById('media-root-directory').value,
+                debrid_sync_limit: parseInt(document.getElementById('debrid-sync-limit').value) || 100,
+                performance_mode: document.getElementById('performance-mode').value,
                 download_clients: {}
             };
             
@@ -1016,6 +1234,15 @@ HTML_TEMPLATE = '''
                     <label>Completed Downloads Folder:</label>
                     <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${baseDir}/completed_downloads">
                 </div>
+                <div class="form-row">
+                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
+                    <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="" placeholder="http://localhost:8989 or http://localhost:7878">
+                </div>
+                <div class="form-row">
+                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
+                    <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
+                    <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
+                </div>
             `;
             clientsDiv.appendChild(clientDiv);
         }
@@ -1025,19 +1252,202 @@ HTML_TEMPLATE = '''
                 loadSettings();
             }
         }
+        
+        function moveQueue(client, direction, filename) {
+            fetch(`/api/queue/move/${client}/${direction}/${filename}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success && data.message) {
+                        console.log(data.message);
+                    }
+                    loadStatus();
+                })
+                .catch(err => console.error('moveQueue error:', err));
+        }
+        
+        function testArrConnection(clientName) {
+            const url = document.getElementById(`arr-url-${clientName}`).value;
+            const apiKey = document.getElementById(`arr-key-${clientName}`).value;
+            
+            if (!url || !apiKey) {
+                alert('Please enter both URL and API key');
+                return;
+            }
+            
+            fetch('/api/test-arr', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url, api_key: apiKey})
+            })
+                .then(r => r.json())
+                .then(data => {
+                    alert(data.message);
+                })
+                .catch(err => {
+                    console.error('Test connection error:', err);
+                    alert('Test failed: ' + err);
+                });
+        }
 
+        function syncDebridDownloads() {
+            if (!confirm('Sync Real-Debrid download history? This will fetch all downloads from your Real-Debrid account.')) return;
+            
+            fetch('/api/debrid-downloads/sync', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    alert(data.message);
+                    if (data.success) loadDebridDownloads();
+                })
+                .catch(err => {
+                    console.error('Sync error:', err);
+                    alert('Sync failed: ' + err);
+                });
+        }
+        
+        let currentDebridPage = 1;
+        
+        function loadDebridDownloads(page = 1) {
+            currentDebridPage = page;
+            const search = document.getElementById('debrid-search').value;
+            const sort = document.getElementById('debrid-sort').value;
+            const status = document.getElementById('debrid-status').value;
+            
+            fetch(`/api/debrid-downloads?search=${encodeURIComponent(search)}&sort=${sort}&status=${encodeURIComponent(status)}&page=${page}`)
+                .then(r => r.json())
+                .then(data => {
+                    const debridList = document.getElementById('debrid-list');
+                    debridList.innerHTML = '';
+                    
+                    if (data.downloads && data.downloads.length > 0) {
+                        data.downloads.forEach(download => {
+                            const item = document.createElement('div');
+                            item.className = 'download-item';
+                            item.id = 'debrid-' + download.id;
+                            
+                            const sizeGB = (download.filesize / (1024*1024*1024)).toFixed(2);
+                            const date = download.generated ? new Date(download.generated).toLocaleString() : 'Unknown';
+                            const statusColor = download.status === 'Already in Manual Downloads' ? '#28a745' : 
+                                              download.status === 'Already in Media Library' ? '#007acc' : 
+                                              download.status === 'Not Downloaded' ? '#ffc107' : '#999';
+                            
+                            item.innerHTML = `
+                                <div style="margin-bottom: 8px;">
+                                    <strong>${download.filename}</strong>
+                                </div>
+                                <div style="font-size: 13px; color: #ccc; margin: 5px 0;">
+                                    Size: ${sizeGB} GB | Source: ${download.host || 'Unknown'} | Date: ${date}
+                                </div>
+                                <div style="margin: 5px 0;">
+                                    <span style="color: ${statusColor}; font-weight: bold;">Status: ${download.status}</span>
+                                </div>
+                            `;
+                            
+                            // Show progress bar if downloading
+                            const progress = data.progress[download.id];
+                            if (progress) {
+                                const progressDiv = document.createElement('div');
+                                progressDiv.style.margin = '10px 0';
+                                progressDiv.innerHTML = `
+                                    <div style="font-size: 13px; color: #ccc; margin-bottom: 3px;">${progress.status}</div>
+                                    <div class="progress-bar download-progress">
+                                        <div class="progress-fill" style="width: ${progress.progress}%"></div>
+                                        <div class="progress-text">${progress.progress}%</div>
+                                    </div>
+                                `;
+                                item.appendChild(progressDiv);
+                            } else if (download.status !== 'Already in Manual Downloads' && download.status !== 'Already in Media Library') {
+                                const downloadBtn = document.createElement('button');
+                                downloadBtn.className = 'retry-btn';
+                                downloadBtn.textContent = 'Download';
+                                downloadBtn.onclick = () => downloadDebridFile(download.id);
+                                item.appendChild(downloadBtn);
+                            }
+                            
+                            debridList.appendChild(item);
+                        });
+                    } else {
+                        debridList.innerHTML = '<div class="download-item">No downloads found. Click "Sync Debrid Downloads" to fetch from Real-Debrid.</div>';
+                    }
+                    
+                    // Pagination controls
+                    const pagination = document.getElementById('debrid-pagination');
+                    if (data.total_pages > 1) {
+                        pagination.innerHTML = '';
+                        
+                        if (page > 1) {
+                            const prevBtn = document.createElement('button');
+                            prevBtn.className = 'retry-btn';
+                            prevBtn.textContent = 'Previous';
+                            prevBtn.onclick = () => loadDebridDownloads(page - 1);
+                            pagination.appendChild(prevBtn);
+                        }
+                        
+                        const pageInfo = document.createElement('span');
+                        pageInfo.style.margin = '0 15px';
+                        pageInfo.textContent = `Page ${page} of ${data.total_pages} (${data.total} total)`;
+                        pagination.appendChild(pageInfo);
+                        
+                        if (page < data.total_pages) {
+                            const nextBtn = document.createElement('button');
+                            nextBtn.className = 'retry-btn';
+                            nextBtn.textContent = 'Next';
+                            nextBtn.onclick = () => loadDebridDownloads(page + 1);
+                            pagination.appendChild(nextBtn);
+                        }
+                    } else {
+                        pagination.innerHTML = '';
+                    }
+                })
+                .catch(err => console.error('loadDebridDownloads error:', err));
+        }
+        
+        function downloadDebridFile(fileId) {
+            if (!confirm('Download this file to your manual downloads folder?')) return;
+            
+            fetch(`/api/debrid-downloads/download/${fileId}`, {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) {
+                        alert(data.message);
+                    }
+                    // Start polling for progress
+                    const pollInterval = setInterval(() => {
+                        loadDebridDownloads();
+                    }, 1000);
+                    
+                    // Stop polling after 5 minutes
+                    setTimeout(() => clearInterval(pollInterval), 300000);
+                })
+                .catch(err => {
+                    console.error('Download error:', err);
+                    alert('Download failed: ' + err);
+                });
+        }
+        
+        // Event listeners for debrid downloads filters
+        document.addEventListener('DOMContentLoaded', function() {
+            const debridSearch = document.getElementById('debrid-search');
+            const debridSort = document.getElementById('debrid-sort');
+            const debridStatus = document.getElementById('debrid-status');
+            
+            if (debridSearch) debridSearch.addEventListener('input', () => loadDebridDownloads(1));
+            if (debridSort) debridSort.addEventListener('change', () => loadDebridDownloads(1));
+            if (debridStatus) debridStatus.addEventListener('change', () => loadDebridDownloads(1));
+        });
+        
         // Restore active tab on page load
         const savedTab = localStorage.getItem('activeTab') || 'overview';
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         document.getElementById(savedTab).classList.add('active');
         const navItems = document.querySelectorAll('.nav-item');
-        const sections = ['overview', 'downloads', 'history', 'completed', 'logs', 'settings'];
+        const sections = ['overview', 'downloads', 'history', 'debrid-downloads', 'completed', 'logs', 'settings'];
         const index = sections.indexOf(savedTab);
         if (index >= 0) navItems[index].classList.add('active');
         
         if (savedTab === 'logs') loadLogs();
         if (savedTab === 'history') loadHistory(1);
+        if (savedTab === 'debrid-downloads') loadDebridDownloads();
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();
         

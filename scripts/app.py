@@ -6,6 +6,7 @@ import logging
 import requests
 import sys
 import threading
+import json
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -14,14 +15,27 @@ from logging.handlers import RotatingFileHandler
 from web_ui import WebUI
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder):
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, performance_mode='medium', client_name=''):
         self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
         self.completed_magnets_folder = completed_magnets_folder
         self.in_progress_folder = in_progress_folder
-        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.client_name = client_name
+        
+        # Set performance parameters
+        perf_settings = {
+            'low': {'workers': 1, 'chunk_size': 4096},
+            'medium': {'workers': 2, 'chunk_size': 8192},
+            'high': {'workers': 4, 'chunk_size': 16384}
+        }
+        settings = perf_settings.get(performance_mode, perf_settings['medium'])
+        self.max_workers = settings['workers']
+        self.chunk_size = settings['chunk_size']
+        
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.processing_files = set()
+        self.queued_files = []  # Ordered list of queued files
         self.download_progress = {}  # Track progress for each magnet file
         self.file_downloads = {}  # Track individual file downloads within torrents
         self.retry_attempts = {}  # Track retry attempts for failed magnets
@@ -33,12 +47,13 @@ class MagnetHandler(FileSystemEventHandler):
         if not event.src_path.endswith('.magnet'):
             return
         
-        if event.src_path in self.processing_files:
-            logging.debug(f"Already processing: {event.src_path}")
+        if event.src_path in self.processing_files or event.src_path in self.queued_files:
+            logging.debug(f"Already processing or queued: {event.src_path}")
             return
             
-        if len(self.processing_files) >= 3:
-            logging.info(f"Maximum concurrent downloads reached (3), queuing: {event.src_path}")
+        if len(self.processing_files) >= self.max_workers:
+            logging.info(f"Maximum concurrent downloads reached ({self.max_workers}), queuing: {event.src_path}")
+            self.queued_files.append(event.src_path)
             return
             
         logging.info(f"New magnet file detected: {event.src_path}")
@@ -53,6 +68,7 @@ class MagnetHandler(FileSystemEventHandler):
             self.processing_files.discard(file_path)
             self.download_progress.pop(file_path, None)
             self.file_downloads.pop(file_path, None)
+            self._process_next_queued()
     
     def process_magnet(self, file_path):
         try:
@@ -79,20 +95,37 @@ class MagnetHandler(FileSystemEventHandler):
             torrent_id = self.check_or_add_torrent(magnet_link, file_path)
             if not torrent_id:
                 return
-            if torrent_id == 'INFRINGING':
-                # Move magnet to completed to prevent reprocessing
-                os.makedirs(self.completed_magnets_folder, exist_ok=True)
-                filename = os.path.basename(file_path)
-                os.rename(file_path, os.path.join(self.completed_magnets_folder, filename))
-                logging.info(f"Moved infringing magnet to completed: {filename}")
+            if torrent_id == 'FAILED':
+                # Report failure and delete magnet file
+                self.report_failure_to_arr(filename)
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                except:
+                    pass
                 return
             
             self.download_progress[file_path] = {'status': 'Selecting files', 'progress': 20, 'cache_progress': 10, 'download_progress': 0}
-            self.select_files(torrent_id)
+            if not self.select_files(torrent_id):
+                self.delete_torrent(torrent_id)
+                self.report_failure_to_arr(filename)
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                except:
+                    pass
+                return
             
             self.download_progress[file_path] = {'status': 'Caching to Real-Debrid', 'progress': 30, 'cache_progress': 15, 'download_progress': 0}
             results = self.wait_for_torrent(torrent_id, file_path)
             if not results:
+                self.delete_torrent(torrent_id)
+                self.report_failure_to_arr(filename)
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Deleted failed magnet: {os.path.basename(file_path)}")
+                except:
+                    pass
                 return
             
             # Initialize individual file progress bars
@@ -238,13 +271,17 @@ class MagnetHandler(FileSystemEventHandler):
             else:
                 try:
                     error_data = response.json()
-                    if error_data.get('error_code') == 35:
-                        logging.error(f"Infringing file detected, marking as failed: {response.text}")
-                        return 'INFRINGING'
+                    error_code = error_data.get('error_code')
+                    if error_code == 35:
+                        logging.error(f"Infringing file detected: {response.text}")
+                        return 'FAILED'
+                    elif error_code in [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]:
+                        logging.error(f"Real-Debrid error {error_code}: {response.text}")
+                        return 'FAILED'
                 except:
                     pass
                 logging.error(f"Failed to add torrent (status {response.status_code}): {response.text}")
-                return None
+                return 'FAILED'
         except requests.RequestException as e:
             logging.error(f"Network error adding torrent: {e}")
             return None
@@ -253,7 +290,7 @@ class MagnetHandler(FileSystemEventHandler):
         api_token = self.get_api_token()
         if not api_token:
             logging.error("No API token available for file selection")
-            return
+            return False
             
         url = f"https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}"
         headers = {"Authorization": f"Bearer {api_token}"}
@@ -263,10 +300,16 @@ class MagnetHandler(FileSystemEventHandler):
         response = requests.post(url, headers=headers, data=data)
         if response.status_code == 204:
             logging.info(f"Files selected for torrent: {torrent_id}")
+            return True
         elif response.status_code == 202:
             logging.info(f"Files selected for torrent: {torrent_id}")
+            return True
+        elif response.status_code == 404:
+            logging.error(f"Torrent not found (404): {torrent_id}")
+            return False
         else:
-            logging.warning(f"File selection response: {response.status_code}")
+            logging.warning(f"File selection failed (status {response.status_code}): {torrent_id}")
+            return False
     
     def wait_for_torrent(self, torrent_id, file_path=None):
         api_token = self.get_api_token()
@@ -416,7 +459,7 @@ class MagnetHandler(FileSystemEventHandler):
             downloaded = 0
             
             with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
                     # Check if download was aborted
                     if file_path and file_path not in self.download_progress:
                         logging.info(f"Download aborted during file transfer: {filename}")
@@ -495,6 +538,67 @@ class MagnetHandler(FileSystemEventHandler):
             logging.info(f"Torrent deleted successfully: {torrent_id}")
         else:
             logging.warning(f"Torrent deletion response: {response.status_code}")
+    
+    def report_failure_to_arr(self, magnet_filename):
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            client_config = config.get('download_clients', {}).get(self.client_name, {})
+            arr_url = client_config.get('arr_url', '')
+            arr_api_key = client_config.get('arr_api_key', '')
+            
+            if not arr_url or not arr_api_key:
+                return
+            
+            # Extract download ID from filename (format varies but usually contains ID)
+            import re
+            id_match = re.search(r'[_-]([0-9]+)[_\.]', magnet_filename)
+            if not id_match:
+                logging.debug(f"Could not extract download ID from: {magnet_filename}")
+                return
+            
+            download_id = id_match.group(1)
+            
+            # Try to find and remove from queue
+            headers = {'X-Api-Key': arr_api_key}
+            queue_url = f"{arr_url.rstrip('/')}/api/v3/queue"
+            
+            response = requests.get(queue_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                queue_items = response.json().get('records', [])
+                for item in queue_items:
+                    if str(item.get('id')) == download_id or download_id in item.get('title', ''):
+                        delete_url = f"{queue_url}/{item['id']}?blocklist=true&removeFromClient=true"
+                        del_response = requests.delete(delete_url, headers=headers, timeout=10)
+                        if del_response.status_code in [200, 204]:
+                            logging.info(f"Reported failure to {self.client_name}: {magnet_filename}")
+                        else:
+                            logging.warning(f"Failed to report to {self.client_name}: {del_response.status_code}")
+                        return
+        except Exception as e:
+            logging.debug(f"Error reporting failure to {self.client_name}: {e}")
+    
+    def _process_next_queued(self):
+        if self.queued_files and len(self.processing_files) < self.max_workers:
+            next_file = self.queued_files.pop(0)
+            if os.path.exists(next_file):
+                logging.info(f"Processing queued magnet: {next_file}")
+                self.processing_files.add(next_file)
+                self.download_progress[next_file] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
+                self.executor.submit(self._process_magnet_wrapper, next_file)
+    
+    def move_queue_item(self, file_path, direction):
+        if file_path not in self.queued_files:
+            return False
+        idx = self.queued_files.index(file_path)
+        if direction == 'up' and idx > 0:
+            self.queued_files[idx], self.queued_files[idx-1] = self.queued_files[idx-1], self.queued_files[idx]
+            return True
+        elif direction == 'down' and idx < len(self.queued_files) - 1:
+            self.queued_files[idx], self.queued_files[idx+1] = self.queued_files[idx+1], self.queued_files[idx]
+            return True
+        return False
 
 def process_existing_magnets(magnets_folder, handler):
     """Process any existing magnet files in the folder"""
@@ -506,8 +610,8 @@ def process_existing_magnets(magnets_folder, handler):
         for filename in magnet_files:
             file_path = os.path.join(magnets_folder, filename)
             
-            if file_path in handler.processing_files:
-                logging.debug(f"Already processing: {filename}")
+            if file_path in handler.processing_files or file_path in handler.queued_files:
+                logging.debug(f"Already processing or queued: {filename}")
                 continue
             
             # Check if file is in cooldown
@@ -517,9 +621,11 @@ def process_existing_magnets(magnets_folder, handler):
                 else:
                     handler.retry_cooldown.pop(file_path, None)
                 
-            if len(handler.processing_files) >= 3:
-                logging.debug(f"Maximum concurrent downloads reached (3), skipping: {filename}")
-                break
+            if len(handler.processing_files) >= handler.max_workers:
+                logging.debug(f"Maximum concurrent downloads reached ({handler.max_workers}), queuing: {filename}")
+                if file_path not in handler.queued_files:
+                    handler.queued_files.append(file_path)
+                continue
                 
             # Check if file is accessible
             try:
@@ -562,8 +668,11 @@ def setup_handlers(config_path, observer):
         os.makedirs(completed_magnets_folder, exist_ok=True)
         os.makedirs(completed_downloads_folder, exist_ok=True)
         
+        # Get performance mode
+        performance_mode = config.get('performance_mode', 'medium')
+        
         # Create handler
-        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder)
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, performance_mode, client_name)
         handlers.append((client_name, handler, magnets_folder))
         
         # Schedule observer
@@ -572,6 +681,183 @@ def setup_handlers(config_path, observer):
         logging.info(f"Configured client: {client_name}")
     
     return handlers
+
+class DebridDownloadsManager:
+    def __init__(self, config_path, base_dir):
+        self.config_path = config_path
+        self.db_path = os.path.join(base_dir, 'debrid_downloads.json')
+        self.downloads = self.load_downloads()
+        self.download_progress = {}
+        
+    def load_downloads(self):
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, 'r') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+    
+    def save_downloads(self):
+        with open(self.db_path, 'w') as f:
+            json.dump(self.downloads, f, indent=2)
+    
+    def sync_from_api(self):
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            api_token = config.get('real_debrid_api_token', '').strip().strip('"').strip("'")
+            if not api_token or api_token == 'YOUR_API_TOKEN_HERE':
+                return {'success': False, 'message': 'No valid API token'}
+            
+            limit = config.get('debrid_sync_limit', 100)
+            url = f'https://api.real-debrid.com/rest/1.0/downloads?limit={limit}'
+            headers = {'Authorization': f'Bearer {api_token}'}
+            response = requests.get(url, headers=headers, timeout=30)
+            
+            if response.status_code != 200:
+                return {'success': False, 'message': f'API error: {response.status_code}'}
+            
+            rd_downloads = response.json()
+            
+            # Get manual downloads folder
+            manual_folder = config.get('manual_downloads_folder', '')
+            if not manual_folder:
+                manual_folder = os.path.join(os.path.expanduser('~'), 'Downloads', 'Debridarr_Manual')
+            manual_folder = os.path.expandvars(manual_folder)
+            manual_files = set()
+            if os.path.exists(manual_folder):
+                manual_files = set(os.listdir(manual_folder))
+            
+            # Check media directory if configured
+            media_root = config.get('media_root_directory', '')
+            media_files = set()
+            if media_root and os.path.exists(media_root):
+                for root, dirs, files in os.walk(media_root):
+                    media_files.update(files)
+            
+            # Process downloads
+            new_downloads = []
+            for item in rd_downloads:
+                filename = item.get('filename', '')
+                file_id = item.get('id', '')
+                
+                # Determine status
+                status = 'Not Downloaded'
+                if filename in manual_files:
+                    status = 'Already in Manual Downloads'
+                elif media_root and filename in media_files:
+                    status = 'Already in Media Library'
+                elif not media_root:
+                    status = 'Unknown'
+                
+                new_downloads.append({
+                    'id': file_id,
+                    'filename': filename,
+                    'filesize': item.get('filesize', 0),
+                    'link': item.get('link', ''),
+                    'host': item.get('host', ''),
+                    'generated': item.get('generated', ''),
+                    'status': status
+                })
+            
+            self.downloads = new_downloads
+            self.save_downloads()
+            
+            return {'success': True, 'message': f'Synced {len(new_downloads)} downloads', 'count': len(new_downloads)}
+        except Exception as e:
+            logging.error(f'Sync error: {e}')
+            return {'success': False, 'message': str(e)}
+    
+    def get_downloads(self, search='', sort_by='date_desc', status_filter='all'):
+        filtered = self.downloads
+        
+        # Filter by search - flexible matching
+        if search:
+            search_terms = search.lower().split()
+            filtered = [d for d in filtered if all(term in d['filename'].lower().replace('.', ' ').replace('_', ' ') for term in search_terms)]
+        
+        # Filter by status
+        if status_filter != 'all':
+            filtered = [d for d in filtered if d['status'] == status_filter]
+        
+        # Sort
+        if sort_by == 'date_desc':
+            filtered.sort(key=lambda x: x.get('generated', ''), reverse=True)
+        elif sort_by == 'date_asc':
+            filtered.sort(key=lambda x: x.get('generated', ''))
+        elif sort_by == 'name_asc':
+            filtered.sort(key=lambda x: x['filename'])
+        elif sort_by == 'name_desc':
+            filtered.sort(key=lambda x: x['filename'], reverse=True)
+        elif sort_by == 'size_desc':
+            filtered.sort(key=lambda x: x.get('filesize', 0), reverse=True)
+        elif sort_by == 'size_asc':
+            filtered.sort(key=lambda x: x.get('filesize', 0))
+        
+        return filtered
+    
+    def download_file(self, file_id):
+        try:
+            # Find the download
+            download = next((d for d in self.downloads if d['id'] == file_id), None)
+            if not download:
+                return {'success': False, 'message': 'Download not found'}
+            
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            api_token = config.get('real_debrid_api_token', '').strip().strip('"').strip("'")
+            if not api_token:
+                return {'success': False, 'message': 'No API token'}
+            
+            # Unrestrict the link first
+            self.download_progress[file_id] = {'progress': 0, 'status': 'Unrestricting link'}
+            unrestrict_url = 'https://api.real-debrid.com/rest/1.0/unrestrict/link'
+            headers = {'Authorization': f'Bearer {api_token}'}
+            data = {'link': download['link']}
+            
+            response = requests.post(unrestrict_url, headers=headers, data=data, timeout=30)
+            if response.status_code != 200:
+                self.download_progress.pop(file_id, None)
+                return {'success': False, 'message': f'Failed to unrestrict link: {response.status_code}'}
+            
+            download_url = response.json()['download']
+            
+            # Get manual downloads folder
+            manual_folder = config.get('manual_downloads_folder', '')
+            if not manual_folder:
+                manual_folder = os.path.join(os.path.expanduser('~'), 'Downloads', 'Debridarr_Manual')
+            manual_folder = os.path.expandvars(manual_folder)
+            os.makedirs(manual_folder, exist_ok=True)
+            
+            # Download the file
+            self.download_progress[file_id] = {'progress': 0, 'status': 'Downloading'}
+            response = requests.get(download_url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            filepath = os.path.join(manual_folder, download['filename'])
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = int((downloaded / total_size) * 100)
+                        self.download_progress[file_id] = {'progress': progress, 'status': 'Downloading'}
+            
+            # Update status
+            download['status'] = 'Already in Manual Downloads'
+            self.save_downloads()
+            self.download_progress.pop(file_id, None)
+            
+            return {'success': True, 'message': f'Downloaded to {filepath}'}
+        except Exception as e:
+            logging.error(f'Download error: {e}')
+            self.download_progress.pop(file_id, None)
+            return {'success': False, 'message': str(e)}
 
 def main(shutdown_event=None):
     # All data in ProgramData for write access and preservation
@@ -594,6 +880,9 @@ def main(shutdown_event=None):
     config_path = os.path.join(base_dir, 'config.yaml')
     observer = Observer()
     handlers = []
+    
+    # Initialize Debrid Downloads Manager
+    debrid_manager = DebridDownloadsManager(config_path, base_dir)
     
     # Setup initial handlers
     handlers = setup_handlers(config_path, observer)
@@ -618,7 +907,7 @@ def main(shutdown_event=None):
         logging.info("Debridarr started - monitoring for magnet files")
         
         # Start web UI in separate thread with reload callback
-        web_ui = WebUI(config_path, handlers, reload_callback=reload_handlers)
+        web_ui = WebUI(config_path, handlers, debrid_manager=debrid_manager, reload_callback=reload_handlers)
         web_thread = threading.Thread(target=web_ui.run, daemon=True)
         web_thread.start()
         logging.info("Web UI started on http://127.0.0.1:3636")

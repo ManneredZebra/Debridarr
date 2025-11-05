@@ -9,6 +9,17 @@ if %errorLevel% == 0 (
     powershell -Command "Start-Process '%~f0' -Verb RunAs"
     exit /b
 )
+
+:: Check if Debridarr is running and close it
+set WAS_RUNNING=0
+tasklist /FI "IMAGENAME eq Debridarr.exe" 2>NUL | find /I /N "Debridarr.exe">NUL
+if "%ERRORLEVEL%"=="0" (
+    echo Debridarr is running. Closing it...
+    set WAS_RUNNING=1
+    taskkill /F /IM Debridarr.exe >nul 2>&1
+    timeout /t 2 /nobreak >nul
+)
+
 echo Installing Python dependencies...
 cd /d "%~dp0"
 py -m pip install --upgrade pip
@@ -52,15 +63,25 @@ if not exist "%CONTENT_DIR%\config.yaml" (
     echo Config file already exists, skipping.
 )
 
-echo Setup complete! Please edit C:\ProgramData\Debridarr\config.yaml with your Real Debrid API token.
 if exist "%INSTALL_DIR%\bin\Debridarr.exe" (
-    echo Starting Debridarr in system tray...
-    start "" "%INSTALL_DIR%\bin\Debridarr.exe"
-    timeout /t 2 /nobreak >nul
-    echo Opening Web UI...
-    start http://127.0.0.1:3636
-    timeout /t 1 /nobreak >nul
-    exit
+    if %WAS_RUNNING%==1 (
+        echo Update complete! Restarting Debridarr...
+        start "" "%INSTALL_DIR%\bin\Debridarr.exe"
+        timeout /t 2 /nobreak >nul
+        echo Opening Web UI...
+        start http://127.0.0.1:3636
+        timeout /t 1 /nobreak >nul
+        exit
+    ) else (
+        echo Setup complete! Please edit C:\ProgramData\Debridarr\config.yaml with your Real Debrid API token.
+        echo Starting Debridarr in system tray...
+        start "" "%INSTALL_DIR%\bin\Debridarr.exe"
+        timeout /t 2 /nobreak >nul
+        echo Opening Web UI...
+        start http://127.0.0.1:3636
+        timeout /t 1 /nobreak >nul
+        exit
+    )
 ) else (
     echo ERROR: Debridarr.exe was not created. Check the PyInstaller output above for errors.
     pause
