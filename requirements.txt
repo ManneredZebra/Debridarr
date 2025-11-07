@@ -3,3 +3,4 @@ watchdog>=3.0.0
 pystray>=0.19.4
 Pillow>=10.0.1
 PyYAML>=6.0
+Flask>=2.0.0

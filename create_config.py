@@ -1,28 +1,30 @@
 import os
 import yaml
 
-# Get the Debridarr directory
-debridarr_dir = os.path.join(os.environ['LOCALAPPDATA'], 'Debridarr')
+# All data in ProgramData for write access and preservation
+content_dir = 'C:\\ProgramData\\Debridarr'
 
 config = {
     'real_debrid_api_token': 'YOUR_API_TOKEN_HERE',
     'download_clients': {
         'sonarr': {
-            'magnets_folder': os.path.join(debridarr_dir, 'content', 'sonarr', 'magnets'),
-            'in_progress_folder': os.path.join(debridarr_dir, 'content', 'sonarr', 'in_progress'),
-            'completed_magnets_folder': os.path.join(debridarr_dir, 'content', 'sonarr', 'completed_magnets'),
-            'completed_downloads_folder': os.path.join(debridarr_dir, 'content', 'sonarr', 'completed_downloads')
+            'magnets_folder': os.path.join(content_dir, 'sonarr', 'magnets'),
+            'in_progress_folder': os.path.join(content_dir, 'sonarr', 'in_progress'),
+            'completed_magnets_folder': os.path.join(content_dir, 'sonarr', 'completed_magnets'),
+            'completed_downloads_folder': os.path.join(content_dir, 'sonarr', 'completed_downloads'),
+            'failed_magnets_folder': os.path.join(content_dir, 'sonarr', 'failed_magnets')
         },
         'radarr': {
-            'magnets_folder': os.path.join(debridarr_dir, 'content', 'radarr', 'magnets'),
-            'in_progress_folder': os.path.join(debridarr_dir, 'content', 'radarr', 'in_progress'),
-            'completed_magnets_folder': os.path.join(debridarr_dir, 'content', 'radarr', 'completed_magnets'),
-            'completed_downloads_folder': os.path.join(debridarr_dir, 'content', 'radarr', 'completed_downloads')
+            'magnets_folder': os.path.join(content_dir, 'radarr', 'magnets'),
+            'in_progress_folder': os.path.join(content_dir, 'radarr', 'in_progress'),
+            'completed_magnets_folder': os.path.join(content_dir, 'radarr', 'completed_magnets'),
+            'completed_downloads_folder': os.path.join(content_dir, 'radarr', 'completed_downloads'),
+            'failed_magnets_folder': os.path.join(content_dir, 'radarr', 'failed_magnets')
         }
     }
 }
 
-config_path = os.path.join(debridarr_dir, 'config.yaml')
+config_path = os.path.join(content_dir, 'config.yaml')
 with open(config_path, 'w') as f:
     f.write("# Debridarr Configuration\n")
     f.write("# Comment out any clients you don't use\n\n")
