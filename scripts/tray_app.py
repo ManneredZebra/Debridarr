@@ -17,7 +17,7 @@ def create_image():
     try:
         # Check multiple possible locations
         possible_paths = [
-            os.path.join(os.path.dirname(sys.executable), '..', 'icon.png'),  # From Program Files
+            os.path.join(os.path.dirname(sys.executable), 'icon.png'),  # Same dir as exe
             os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icon.png'),  # From scripts
             'icon.png'  # Current directory
         ]
@@ -37,41 +37,50 @@ def create_image():
         dc.rectangle([16, 16, 48, 48], fill='white')
         return image
 
+def open_web_ui():
+    os.system('start http://127.0.0.1:3636')
+
 def quit_action(icon, item):
-    shutdown_event.set()
     icon.stop()
-    os._exit(0)
 
 def main():
-    # Check for existing instance using mutex
-    mutex_name = "Global\\Debridarr_SingleInstance"
-    kernel32 = ctypes.windll.kernel32
-    mutex = kernel32.CreateMutexW(None, True, mutex_name)
+    # Start the main app in a separate thread
+    app_thread = threading.Thread(target=lambda: app_main(shutdown_event), daemon=True)
+    app_thread.start()
     
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        # App already running, just open the web UI
-        os.system("start http://127.0.0.1:3636")
-        sys.exit(0)
+    # Wait for Flask to be ready and auto-open web UI
+    def wait_and_open():
+        import socket
+        import time
+        for i in range(30):  # Wait up to 30 seconds
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                result = sock.connect_ex(('127.0.0.1', 3636))
+                sock.close()
+                if result == 0:
+                    time.sleep(0.5)  # Brief delay for server to be fully ready
+                    os.system('start http://127.0.0.1:3636')
+                    break
+            except:
+                pass
+            time.sleep(1)
     
-    try:
-        # Start the main app in a separate thread
-        app_thread = threading.Thread(target=lambda: app_main(shutdown_event), daemon=True)
-        app_thread.start()
-        
-        # Create system tray icon
-        icon = pystray.Icon(
-            "Debridarr",
-            create_image(),
-            menu=pystray.Menu(
-                pystray.MenuItem("Open Web UI", lambda: os.system("start http://127.0.0.1:3636")),
-                pystray.MenuItem("Quit", quit_action)
-            )
+    threading.Thread(target=wait_and_open, daemon=True).start()
+    
+    # Create system tray icon
+    icon = pystray.Icon(
+        "Debridarr",
+        create_image(),
+        menu=pystray.Menu(
+            pystray.MenuItem("Open Web UI", lambda: open_web_ui()),
+            pystray.MenuItem("Quit", quit_action)
         )
-        
-        icon.run()
-    finally:
-        if mutex:
-            kernel32.CloseHandle(mutex)
+    )
+    
+    icon.run()
+    shutdown_event.set()
+    os._exit(0)
 
 if __name__ == "__main__":
     main()

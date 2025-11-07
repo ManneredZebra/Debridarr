@@ -9,12 +9,14 @@ from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime
 
 class WebUI:
-    def __init__(self, config_path, handlers, debrid_manager=None, reload_callback=None):
+    def __init__(self, config_path, handlers, debrid_manager=None, reload_callback=None, shutdown_event=None):
         self.config_path = config_path
         self.handlers = handlers
         self.debrid_manager = debrid_manager
         self.reload_callback = reload_callback
+        self.shutdown_event = shutdown_event
         self.app = Flask(__name__)
+        self.server = None
         self.setup_routes()
         
     def setup_routes(self):
@@ -27,7 +29,7 @@ class WebUI:
             try:
                 # Check multiple possible locations
                 possible_paths = [
-                    os.path.join(os.path.dirname(sys.executable), '..', 'icon.png'),  # From Program Files
+                    os.path.join(os.path.dirname(sys.executable), 'icon.png'),  # Same dir as exe
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icon.png'),  # From scripts
                     'icon.png'  # Current directory
                 ]
@@ -519,6 +521,13 @@ class WebUI:
                 return jsonify(result)
             return jsonify({'success': False, 'message': 'Manager not available'})
         
+        @self.app.route('/api/debrid-downloads/locate/<file_id>')
+        def locate_debrid_file(file_id):
+            if self.debrid_manager:
+                result = self.debrid_manager.locate_file(file_id)
+                return jsonify(result)
+            return jsonify({'success': False, 'message': 'Manager not available'})
+        
         @self.app.route('/api/queue/move/<client_name>/<direction>/<path:filename>')
         def move_queue(client_name, direction, filename):
             for name, handler, _ in self.handlers:
@@ -562,8 +571,23 @@ class WebUI:
     
     def run(self):
         import logging
-        logging.getLogger('werkzeug').setLevel(logging.WARNING)
-        self.app.run(host='127.0.0.1', port=3636, debug=False, use_reloader=False)
+        import socket
+        from werkzeug.serving import make_server
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.WARNING)
+        
+        try:
+            logging.info("Starting Flask on 0.0.0.0:3636...")
+            server = make_server('0.0.0.0', 3636, self.app, threaded=True)
+            server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            logging.info("Flask server bound, starting serve_forever...")
+            server.serve_forever()
+        except OSError as e:
+            logging.error(f"Flask failed to bind to port 3636: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            logging.error(f"Flask startup error: {e}", exc_info=True)
+            raise
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -1500,7 +1524,13 @@ HTML_TEMPLATE = '''
                                     </div>
                                 `;
                                 item.appendChild(progressDiv);
-                            } else if (download.status !== 'Already in Manual Downloads' && download.status !== 'Already in Media Library') {
+                            } else if (download.status === 'Already in Manual Downloads' || download.status === 'Already in Media Library') {
+                                const locateBtn = document.createElement('button');
+                                locateBtn.className = 'retry-btn';
+                                locateBtn.textContent = 'Show in Explorer';
+                                locateBtn.onclick = () => locateDebridFile(download.id);
+                                item.appendChild(locateBtn);
+                            } else {
                                 const downloadBtn = document.createElement('button');
                                 downloadBtn.className = 'retry-btn';
                                 downloadBtn.textContent = 'Download';
@@ -1566,6 +1596,20 @@ HTML_TEMPLATE = '''
                 .catch(err => {
                     console.error('Download error:', err);
                     alert('Download failed: ' + err);
+                });
+        }
+        
+        function locateDebridFile(fileId) {
+            fetch(`/api/debrid-downloads/locate/${fileId}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) {
+                        alert(data.message);
+                    }
+                })
+                .catch(err => {
+                    console.error('Locate error:', err);
+                    alert('Failed to locate file: ' + err);
                 });
         }
         

@@ -99,8 +99,8 @@ class MagnetHandler(FileSystemEventHandler):
             if not torrent_id:
                 return
             if torrent_id == 'FAILED':
-                # Report failure and move magnet to failed folder
-                self.report_failure_to_arr(filename)
+                # Report failure and move magnet to failed folder (magnet-specific error, trigger search)
+                self.report_failure_to_arr(filename, trigger_search=True)
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -115,7 +115,8 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_progress[file_path] = {'status': 'Selecting files', 'progress': 20, 'cache_progress': 10, 'download_progress': 0}
             if not self.select_files(torrent_id):
                 self.delete_torrent(torrent_id)
-                self.report_failure_to_arr(filename)
+                # Report failure (magnet-specific error, trigger search)
+                self.report_failure_to_arr(filename, trigger_search=True)
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -126,9 +127,21 @@ class MagnetHandler(FileSystemEventHandler):
             
             self.download_progress[file_path] = {'status': 'Caching to Real-Debrid', 'progress': 30, 'cache_progress': 15, 'download_progress': 0}
             results = self.wait_for_torrent(torrent_id, file_path)
+            if results == 'DEAD':
+                # Dead magnet (0% for 5 minutes) - delete from RD, report failure with search
+                self.delete_torrent(torrent_id)
+                self.report_failure_to_arr(filename, trigger_search=True)
+                try:
+                    os.makedirs(self.failed_magnets_folder, exist_ok=True)
+                    os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
+                    logging.info(f"Moved dead magnet: {os.path.basename(file_path)}")
+                except:
+                    pass
+                return
             if not results:
                 self.delete_torrent(torrent_id)
-                self.report_failure_to_arr(filename)
+                # Report failure (could be timeout, don't trigger search)
+                self.report_failure_to_arr(filename, trigger_search=False)
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -332,6 +345,7 @@ class MagnetHandler(FileSystemEventHandler):
         headers = {"Authorization": f"Bearer {api_token}"}
         
         logging.info(f"Waiting for torrent to complete: {torrent_id}")
+        zero_progress_count = 0
         for attempt in range(60):
             response = requests.get(url, headers=headers)
             if response.status_code == 404:
@@ -354,6 +368,15 @@ class MagnetHandler(FileSystemEventHandler):
                 data = response.json()
                 status = data.get('status', 'unknown')
                 progress = data.get('progress', 0)
+                
+                # Check for dead magnet (0% progress for 5 minutes)
+                if progress == 0 and status not in ['downloaded', 'downloading']:
+                    zero_progress_count += 1
+                    if zero_progress_count >= 30:  # 30 attempts * 10 seconds = 5 minutes
+                        logging.error(f"Torrent {torrent_id} stuck at 0% for 5 minutes, marking as dead")
+                        return 'DEAD'
+                else:
+                    zero_progress_count = 0
                 
                 if attempt % 6 == 0:  # Log every minute
                     logging.info(f"Torrent {torrent_id} status: {status}, progress: {progress}%")
@@ -566,7 +589,7 @@ class MagnetHandler(FileSystemEventHandler):
         else:
             logging.warning(f"Torrent deletion response: {response.status_code}")
     
-    def report_failure_to_arr(self, magnet_filename):
+    def report_failure_to_arr(self, magnet_filename, trigger_search=True):
         try:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -596,15 +619,50 @@ class MagnetHandler(FileSystemEventHandler):
                 queue_items = response.json().get('records', [])
                 for item in queue_items:
                     if str(item.get('id')) == download_id or download_id in item.get('title', ''):
+                        # Get the media ID for triggering search
+                        media_id = item.get('movieId') or item.get('seriesId') or item.get('episodeId')
+                        
                         delete_url = f"{queue_url}/{item['id']}?blocklist=true&removeFromClient=true"
                         del_response = requests.delete(delete_url, headers=headers, timeout=10)
                         if del_response.status_code in [200, 204]:
                             logging.info(f"Reported failure to {self.client_name}: {magnet_filename}")
+                            
+                            # Trigger automatic search if requested and media ID found
+                            if trigger_search and media_id:
+                                self._trigger_arr_search(arr_url, arr_api_key, media_id, item)
                         else:
                             logging.warning(f"Failed to report to {self.client_name}: {del_response.status_code}")
                         return
         except Exception as e:
             logging.debug(f"Error reporting failure to {self.client_name}: {e}")
+    
+    def _trigger_arr_search(self, arr_url, arr_api_key, media_id, queue_item):
+        try:
+            headers = {'X-Api-Key': arr_api_key}
+            
+            # Determine if it's a movie or series/episode
+            if queue_item.get('movieId'):
+                # Radarr movie search
+                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
+                payload = {'name': 'MoviesSearch', 'movieIds': [media_id]}
+            elif queue_item.get('seriesId'):
+                # Sonarr series search
+                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
+                payload = {'name': 'SeriesSearch', 'seriesId': media_id}
+            elif queue_item.get('episodeId'):
+                # Sonarr episode search
+                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
+                payload = {'name': 'EpisodeSearch', 'episodeIds': [media_id]}
+            else:
+                return
+            
+            response = requests.post(search_url, headers=headers, json=payload, timeout=10)
+            if response.status_code in [200, 201]:
+                logging.info(f"Triggered automatic search in {self.client_name} for media ID {media_id}")
+            else:
+                logging.warning(f"Failed to trigger search in {self.client_name}: {response.status_code}")
+        except Exception as e:
+            logging.debug(f"Error triggering search in {self.client_name}: {e}")
     
     def _process_next_queued(self):
         if self.queued_files and len(self.processing_files) < self.max_workers:
@@ -915,12 +973,32 @@ class DebridDownloadsManager:
             
             download_url = response.json()['download']
             
-            # Get manual downloads folder
-            manual_folder = config.get('manual_downloads_folder', '')
-            if not manual_folder:
-                manual_folder = os.path.join(os.path.expanduser('~'), 'Downloads', 'Debridarr_Manual')
-            manual_folder = os.path.expandvars(manual_folder)
-            os.makedirs(manual_folder, exist_ok=True)
+            # Determine destination folder based on media type
+            filename = download['filename']
+            media_info = self.extract_media_info(filename)
+            
+            download_clients = config.get('download_clients', {})
+            destination_folder = None
+            
+            # Check if it's a TV show (has season/episode)
+            if media_info['season'] and media_info['episode']:
+                # TV show - use Sonarr if available
+                if 'sonarr' in download_clients:
+                    destination_folder = os.path.expandvars(download_clients['sonarr']['completed_downloads_folder'])
+            # Check if it's a movie (has year, no season/episode)
+            elif media_info['year']:
+                # Movie - use Radarr if available
+                if 'radarr' in download_clients:
+                    destination_folder = os.path.expandvars(download_clients['radarr']['completed_downloads_folder'])
+            
+            # Fallback to manual downloads folder
+            if not destination_folder:
+                destination_folder = config.get('manual_downloads_folder', '')
+                if not destination_folder:
+                    destination_folder = os.path.join(os.path.expanduser('~'), 'Downloads', 'Debridarr_Manual')
+                destination_folder = os.path.expandvars(destination_folder)
+            
+            os.makedirs(destination_folder, exist_ok=True)
             
             # Download the file
             self.download_progress[file_id] = {'progress': 0, 'status': 'Downloading'}
@@ -930,7 +1008,7 @@ class DebridDownloadsManager:
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             
-            filepath = os.path.join(manual_folder, download['filename'])
+            filepath = os.path.join(destination_folder, filename)
             with open(filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
@@ -949,6 +1027,44 @@ class DebridDownloadsManager:
             logging.error(f'Download error: {e}')
             self.download_progress.pop(file_id, None)
             return {'success': False, 'message': str(e)}
+    
+    def locate_file(self, file_id):
+        try:
+            download = next((d for d in self.downloads if d['id'] == file_id), None)
+            if not download:
+                return {'success': False, 'message': 'Download not found'}
+            
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            filename = download['filename']
+            
+            # Check manual downloads folder
+            manual_folder = config.get('manual_downloads_folder', '')
+            if not manual_folder:
+                manual_folder = os.path.join(os.path.expanduser('~'), 'Downloads', 'Debridarr_Manual')
+            manual_folder = os.path.expandvars(manual_folder)
+            manual_path = os.path.join(manual_folder, filename)
+            
+            if os.path.exists(manual_path):
+                import subprocess
+                subprocess.Popen(f'explorer /select,"{manual_path}"')
+                return {'success': True, 'message': 'Opened in Explorer'}
+            
+            # Check media library
+            media_root = config.get('media_root_directory', '')
+            if media_root and os.path.exists(media_root):
+                for root, dirs, files in os.walk(media_root):
+                    if filename in files:
+                        file_path = os.path.join(root, filename)
+                        import subprocess
+                        subprocess.Popen(f'explorer /select,"{file_path}"')
+                        return {'success': True, 'message': 'Opened in Explorer'}
+            
+            return {'success': False, 'message': 'File not found'}
+        except Exception as e:
+            logging.error(f'Locate error: {e}')
+            return {'success': False, 'message': str(e)}
 
 def main(shutdown_event=None):
     # All data in ProgramData for write access and preservation
@@ -958,6 +1074,10 @@ def main(shutdown_event=None):
     logs_dir = os.path.join(base_dir, 'logs')
     os.makedirs(logs_dir, exist_ok=True)
     log_file = os.path.join(logs_dir, 'debridarr.log')
+    
+    # Write startup marker
+    with open(log_file, 'a') as f:
+        f.write(f"\n\n=== APP STARTING {time.time()} ===\n")
     
     # Setup rotating log handler (100KB max, 3 backup files)
     log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
@@ -998,10 +1118,37 @@ def main(shutdown_event=None):
         logging.info("Debridarr started - monitoring for magnet files")
         
         # Start web UI in separate thread with reload callback
-        web_ui = WebUI(config_path, handlers, debrid_manager=debrid_manager, reload_callback=reload_handlers)
-        web_thread = threading.Thread(target=web_ui.run, daemon=True)
+        def run_web_ui():
+            try:
+                # Wait for port to be fully released from previous instance
+                import socket
+                for i in range(30):
+                    try:
+                        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        test_sock.bind(('0.0.0.0', 3636))
+                        test_sock.close()
+                        logging.info(f"Port 3636 available after {i} seconds")
+                        break
+                    except OSError:
+                        if i == 29:
+                            logging.error("Port 3636 still in use after 30 seconds")
+                            return
+                        time.sleep(1)
+                
+                logging.info("Web UI thread starting Flask...")
+                web_ui.run()
+                logging.info("Flask run() returned (should not happen)")
+            except Exception as e:
+                logging.error(f"Web UI crashed: {e}", exc_info=True)
+                raise
+        
+        logging.info("Creating WebUI instance...")
+        web_ui = WebUI(config_path, handlers, debrid_manager=debrid_manager, reload_callback=reload_handlers, shutdown_event=shutdown_event)
+        logging.info("Starting web thread...")
+        web_thread = threading.Thread(target=run_web_ui, daemon=True)
         web_thread.start()
-        logging.info("Web UI started on http://127.0.0.1:3636")
+        logging.info("Web UI thread started, waiting for Flask to bind...")
         
         while True:
             if shutdown_event and shutdown_event.is_set():
@@ -1015,8 +1162,10 @@ def main(shutdown_event=None):
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
     finally:
+        logging.info("Stopping observer...")
         observer.stop()
         observer.join()
+        logging.info("Shutdown complete")
 
 if __name__ == "__main__":
     main()
