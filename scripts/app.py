@@ -54,9 +54,23 @@ class MagnetHandler(FileSystemEventHandler):
             extensions = []
             for file_type in self.file_types:
                 extensions.extend(categories.get(file_type, []))
+            logging.debug(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {self.file_types})")
             return extensions
-        except:
+        except Exception as e:
+            logging.error(f"Error loading file extensions: {e}")
             return ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']
+    
+    def reload_file_types(self):
+        """Reload allowed extensions from config"""
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            client_config = config.get('download_clients', {}).get(self.client_name, {})
+            self.file_types = client_config.get('file_types', ['video'])
+            self.allowed_extensions = self._get_allowed_extensions()
+            logging.info(f"Reloaded file types for {self.client_name}: {self.file_types} -> {self.allowed_extensions}")
+        except Exception as e:
+            logging.error(f"Error reloading file types: {e}")
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -1122,6 +1136,10 @@ def main(shutdown_event=None):
         nonlocal handlers
         logging.info("Reloading configuration...")
         time.sleep(1)  # Brief delay to ensure config is written
+        # Reload file types for existing handlers
+        for client_name, handler, magnets_folder in handlers:
+            handler.reload_file_types()
+        # Setup new handlers (for new clients)
         handlers = setup_handlers(config_path, observer)
         web_ui.handlers = handlers  # Update WebUI's handlers reference
         logging.info("Configuration reloaded successfully")

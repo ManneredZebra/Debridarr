@@ -473,9 +473,9 @@ class WebUI:
                 with open(self.config_path, 'r') as f:
                     existing_config = yaml.safe_load(f)
                 
-                # If API token ends with '...', keep the existing one
+                # If API token ends with '...' or contains '...', keep the existing one
                 if 'real_debrid_api_token' in new_config:
-                    if new_config['real_debrid_api_token'].endswith('...'):
+                    if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
                 
                 # Preserve file_categories from existing config
