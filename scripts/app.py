@@ -497,19 +497,24 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             logging.info(f"Starting download from: {download_url}")
             
-            # Get filename from URL if rd_filename is not a proper filename
-            if not rd_filename or not any(ext in rd_filename.lower() for ext in self.allowed_extensions):
-                # Extract filename from URL
+            # Check if filename has allowed extension
+            if rd_filename:
+                _, ext = os.path.splitext(rd_filename.lower())
+                if ext not in self.allowed_extensions:
+                    logging.info(f"Skipping file (not in allowed types): {rd_filename} (extension: {ext}, allowed: {self.allowed_extensions})")
+                    return
+            else:
+                # Extract filename from URL if no filename provided
                 url_filename = download_url.split('/')[-1].split('?')[0]
                 if '%' in url_filename:
                     import urllib.parse
                     url_filename = urllib.parse.unquote(url_filename)
                 
-                # Use URL filename if it's an allowed file type
-                if any(ext in url_filename.lower() for ext in self.allowed_extensions) and not url_filename.lower().endswith('.rartv'):
+                _, ext = os.path.splitext(url_filename.lower())
+                if ext in self.allowed_extensions and not url_filename.lower().endswith('.rartv'):
                     rd_filename = url_filename
                 else:
-                    logging.info(f"Skipping file (not in allowed types): {rd_filename or url_filename}")
+                    logging.info(f"Skipping file (not in allowed types): {url_filename} (extension: {ext}, allowed: {self.allowed_extensions})")
                     return
                 
             response = requests.get(download_url, stream=True, timeout=30)
