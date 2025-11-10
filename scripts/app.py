@@ -53,10 +53,23 @@ class MagnetHandler(FileSystemEventHandler):
             # Read file_types from config for this client
             client_config = config.get('download_clients', {}).get(self.client_name, {})
             file_types = client_config.get('file_types', self.file_types)
-            categories = config.get('file_categories', {})
+            # If file_types is empty or None, default to video
+            if not file_types:
+                file_types = ['video']
+            
+            # Default categories
+            default_categories = {
+                'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+                'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+                'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+                'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+            }
+            categories = config.get('file_categories', default_categories)
+            
             extensions = []
             for file_type in file_types:
-                extensions.extend(categories.get(file_type, []))
+                exts = categories.get(file_type, default_categories.get(file_type, []))
+                extensions.extend(exts)
             logging.info(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {file_types})")
             return extensions
         except Exception as e:

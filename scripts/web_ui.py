@@ -478,9 +478,17 @@ class WebUI:
                     if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
                 
-                # Preserve file_categories from existing config
-                if 'file_categories' not in new_config and 'file_categories' in existing_config:
-                    new_config['file_categories'] = existing_config['file_categories']
+                # Ensure file_categories exists
+                if 'file_categories' not in new_config:
+                    if 'file_categories' in existing_config:
+                        new_config['file_categories'] = existing_config['file_categories']
+                    else:
+                        new_config['file_categories'] = {
+                            'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+                            'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+                            'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+                            'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+                        }
                 
                 # Write updated config
                 with open(self.config_path, 'w') as f:
