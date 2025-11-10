@@ -4,22 +4,33 @@ import yaml
 # All data in ProgramData for write access and preservation
 content_dir = 'C:\\ProgramData\\Debridarr'
 
+# File type categories
+FILE_CATEGORIES = {
+    'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+    'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+    'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+    'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+}
+
 config = {
     'real_debrid_api_token': 'YOUR_API_TOKEN_HERE',
+    'file_categories': FILE_CATEGORIES,
     'download_clients': {
         'sonarr': {
             'magnets_folder': os.path.join(content_dir, 'sonarr', 'magnets'),
             'in_progress_folder': os.path.join(content_dir, 'sonarr', 'in_progress'),
             'completed_magnets_folder': os.path.join(content_dir, 'sonarr', 'completed_magnets'),
             'completed_downloads_folder': os.path.join(content_dir, 'sonarr', 'completed_downloads'),
-            'failed_magnets_folder': os.path.join(content_dir, 'sonarr', 'failed_magnets')
+            'failed_magnets_folder': os.path.join(content_dir, 'sonarr', 'failed_magnets'),
+            'file_types': ['video']
         },
         'radarr': {
             'magnets_folder': os.path.join(content_dir, 'radarr', 'magnets'),
             'in_progress_folder': os.path.join(content_dir, 'radarr', 'in_progress'),
             'completed_magnets_folder': os.path.join(content_dir, 'radarr', 'completed_magnets'),
             'completed_downloads_folder': os.path.join(content_dir, 'radarr', 'completed_downloads'),
-            'failed_magnets_folder': os.path.join(content_dir, 'radarr', 'failed_magnets')
+            'failed_magnets_folder': os.path.join(content_dir, 'radarr', 'failed_magnets'),
+            'file_types': ['video']
         }
     }
 }
