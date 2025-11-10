@@ -50,11 +50,14 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
+            # Read file_types from config for this client
+            client_config = config.get('download_clients', {}).get(self.client_name, {})
+            file_types = client_config.get('file_types', self.file_types)
             categories = config.get('file_categories', {})
             extensions = []
-            for file_type in self.file_types:
+            for file_type in file_types:
                 extensions.extend(categories.get(file_type, []))
-            logging.debug(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {self.file_types})")
+            logging.info(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {file_types})")
             return extensions
         except Exception as e:
             logging.error(f"Error loading file extensions: {e}")
