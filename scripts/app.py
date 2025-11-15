@@ -513,25 +513,13 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             logging.info(f"Starting download from: {download_url}")
             
-            # Check if filename has allowed extension
-            if rd_filename:
-                _, ext = os.path.splitext(rd_filename.lower())
-                if ext not in self.allowed_extensions:
-                    logging.info(f"Skipping file (not in allowed types): {rd_filename} (extension: {ext}, allowed: {self.allowed_extensions})")
-                    return
-            else:
-                # Extract filename from URL if no filename provided
+            # Get filename from URL if not provided
+            if not rd_filename:
                 url_filename = download_url.split('/')[-1].split('?')[0]
                 if '%' in url_filename:
                     import urllib.parse
                     url_filename = urllib.parse.unquote(url_filename)
-                
-                _, ext = os.path.splitext(url_filename.lower())
-                if ext in self.allowed_extensions and not url_filename.lower().endswith('.rartv'):
-                    rd_filename = url_filename
-                else:
-                    logging.info(f"Skipping file (not in allowed types): {url_filename} (extension: {ext}, allowed: {self.allowed_extensions})")
-                    return
+                rd_filename = url_filename
                 
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
@@ -589,6 +577,14 @@ class MagnetHandler(FileSystemEventHandler):
             
             # Ensure file is fully written before moving
             time.sleep(2)
+            
+            # Check if file extension is allowed
+            allowed_exts = self._get_allowed_extensions()
+            _, ext = os.path.splitext(filename.lower())
+            if ext not in allowed_exts:
+                logging.info(f"Skipping file (not in allowed types): {filename} (extension: {ext})")
+                os.remove(temp_path)
+                return
             
             # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
