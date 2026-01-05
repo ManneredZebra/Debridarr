@@ -52,6 +52,11 @@ class WebUI:
                     filename = os.path.basename(file_path)
                     progress_info = handler.download_progress.get(file_path, {'status': 'Processing', 'progress': 0, 'cache_progress': 0, 'download_progress': 0})
                     file_downloads = handler.file_downloads.get(file_path, [])
+                    
+                    # Determine if this is uploading/caching or downloading
+                    is_downloading = file_path in handler.downloading_files
+                    phase = "Downloading" if is_downloading else "Uploading/Caching"
+                    
                     downloads.append({
                         'filename': filename,
                         'filepath': file_path,
@@ -60,22 +65,14 @@ class WebUI:
                         'cache_progress': progress_info.get('cache_progress', 0),
                         'files_progress': progress_info.get('files_progress', 0),
                         'files': file_downloads,
-                        'queued': False
+                        'queued': False,
+                        'phase': phase
                     })
-                for file_path in handler.queued_files:
-                    filename = os.path.basename(file_path)
-                    downloads.append({
-                        'filename': filename,
-                        'filepath': file_path,
-                        'status': 'Queued',
-                        'progress': 0,
-                        'cache_progress': 0,
-                        'files_progress': 0,
-                        'files': [],
-                        'queued': True
-                    })
+                # No longer using queued_files since uploads are unlimited
                 status[client_name] = {
                     'active_downloads': len(handler.processing_files),
+                    'downloading_count': len(handler.downloading_files),
+                    'uploading_count': len(handler.processing_files) - len(handler.downloading_files),
                     'downloads': downloads
                 }
             return jsonify(status)
@@ -154,24 +151,19 @@ class WebUI:
                         if filename in processing_file:
                             file_path = processing_file
                             break
-                    if not file_path:
-                        for queued_file in handler.queued_files:
-                            if filename in queued_file:
-                                file_path = queued_file
-                                break
                     if file_path:
                         # Delete torrent from Real-Debrid if it exists
                         torrent_id = handler.torrent_ids.get(file_path)
                         if torrent_id:
                             handler.delete_torrent(torrent_id)
                         
-                        # Remove from tracking
+                        # Remove from all tracking
                         handler.processing_files.discard(file_path)
-                        if file_path in handler.queued_files:
-                            handler.queued_files.remove(file_path)
+                        handler.downloading_files.discard(file_path)
                         handler.download_progress.pop(file_path, None)
                         handler.file_downloads.pop(file_path, None)
                         handler.torrent_ids.pop(file_path, None)
+                        handler.ready_to_download.pop(file_path, None)
                         
                         # Remove magnet file if it exists
                         try:
@@ -179,9 +171,6 @@ class WebUI:
                                 os.remove(file_path)
                         except:
                             pass
-                        
-                        # Process next queued item to free up slot
-                        handler._process_next_queued()
                         
                         return jsonify({'success': True, 'message': f'Aborted {filename}'})
             return jsonify({'success': False, 'message': 'Download not found'})
@@ -418,7 +407,7 @@ class WebUI:
                 if 'real_debrid_api_token' in config:
                     token = config['real_debrid_api_token']
                     config['real_debrid_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
-                # Ensure file_categories exists
+                # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in config:
                     config['file_categories'] = {
                         'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
@@ -478,7 +467,7 @@ class WebUI:
                     if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
                 
-                # Ensure file_categories exists
+                # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in new_config:
                     if 'file_categories' in existing_config:
                         new_config['file_categories'] = existing_config['file_categories']
@@ -550,18 +539,8 @@ class WebUI:
         
         @self.app.route('/api/queue/move/<client_name>/<direction>/<path:filename>')
         def move_queue(client_name, direction, filename):
-            for name, handler, _ in self.handlers:
-                if name == client_name:
-                    file_path = None
-                    for queued_file in handler.queued_files:
-                        if filename in queued_file:
-                            file_path = queued_file
-                            break
-                    if file_path:
-                        if handler.move_queue_item(file_path, direction):
-                            return jsonify({'success': True})
-                        return jsonify({'success': False, 'message': 'Cannot move in that direction'})
-            return jsonify({'success': False, 'message': 'Item not found in queue'})
+            # Queue movement no longer supported since uploads are unlimited
+            return jsonify({'success': False, 'message': 'Queue movement not supported - uploads are no longer queued'})
         
         @self.app.route('/api/test-arr', methods=['POST'])
         def test_arr_connection():
@@ -836,11 +815,15 @@ HTML_TEMPLATE = '''
                             <h3 style="margin-bottom: 15px;">${client.toUpperCase()}</h3>
                             <div style="display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap;">
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
-                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${status.active_downloads}</div>
-                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Active</div>
+                                    <div style="font-size: 24px; font-weight: bold; color: #28a745;">${status.uploading_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Uploading</div>
                                 </div>
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
-                                    <div style="font-size: 24px; font-weight: bold; color: #007acc;">${clientCounts.magnets}</div>
+                                    <div style="font-size: 24px; font-weight: bold; color: #007acc;">${status.downloading_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Downloading</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${clientCounts.magnets}</div>
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Magnets</div>
                                 </div>
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
@@ -880,34 +863,20 @@ HTML_TEMPLATE = '''
                             const item = document.createElement('div');
                             item.className = 'download-item';
                             
-                            if (download.queued) {
-                                item.style.opacity = '0.7';
-                                item.style.border = '1px dashed #666';
+                            // Add phase indicator styling
+                            if (download.phase === 'Downloading') {
+                                item.style.borderLeft = '4px solid #007acc';
+                            } else {
+                                item.style.borderLeft = '4px solid #28a745';
                             }
                             
                             // Add buttons at top
                             const btnContainer = document.createElement('div');
                             btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
                             
-                            if (download.queued) {
-                                const upBtn = document.createElement('button');
-                                upBtn.className = 'retry-btn';
-                                upBtn.textContent = '↑';
-                                upBtn.style.padding = '4px 10px';
-                                upBtn.onclick = function() { moveQueue(client, 'up', download.filename); };
-                                btnContainer.appendChild(upBtn);
-                                
-                                const downBtn = document.createElement('button');
-                                downBtn.className = 'retry-btn';
-                                downBtn.textContent = '↓';
-                                downBtn.style.padding = '4px 10px';
-                                downBtn.onclick = function() { moveQueue(client, 'down', download.filename); };
-                                btnContainer.appendChild(downBtn);
-                            }
-                            
                             const abortBtn = document.createElement('button');
                             abortBtn.className = 'abort-btn';
-                            abortBtn.textContent = download.queued ? 'Remove' : 'Abort';
+                            abortBtn.textContent = 'Abort';
                             abortBtn.onclick = function() { abortDownload(client, download.filename); };
                             btnContainer.appendChild(abortBtn);
                             
@@ -916,8 +885,7 @@ HTML_TEMPLATE = '''
                             const contentDiv = document.createElement('div');
                             contentDiv.innerHTML = `
                                 <strong>${client.toUpperCase()}</strong>: ${download.filename}
-                                <div>${download.queued ? '<span style="color: #ffc107;">⏳ Queued</span>' : download.status}</div>
-                                ${!download.queued ? `
+                                <div><span style="color: ${download.phase === 'Downloading' ? '#007acc' : '#28a745'};">📁 ${download.phase}</span> - ${download.status}</div>
                                 <div class="progress-container">
                                     <div style="flex: 1;">
                                         <div class="progress-label">Real-Debrid Cache</div>
@@ -933,12 +901,12 @@ HTML_TEMPLATE = '''
                                             <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
                                         </div>
                                     </div>
-                                </div>` : ''}
+                                </div>
                             `;
                             item.appendChild(contentDiv);
                             
-                            // Add individual file progress bars if files exist and not queued
-                            if (!download.queued && download.files && download.files.length > 0) {
+                            // Add individual file progress bars if files exist
+                            if (download.files && download.files.length > 0) {
                                 const filesDiv = document.createElement('div');
                                 filesDiv.style.marginTop = '10px';
                                 filesDiv.innerHTML = '<strong>Individual Files:</strong>';
@@ -1299,24 +1267,9 @@ HTML_TEMPLATE = '''
                         clientDiv.className = 'settings-group';
                         clientDiv.style.background = '#3d3d3d';
                         
-                        const selectedTypes = clientConfig.file_types || ['video'];
-                        let fileTypeOptions = '';
-                        Object.keys(fileCategories).forEach(category => {
-                            const extensions = fileCategories[category].join(', ');
-                            const selected = selectedTypes.includes(category) ? 'selected' : '';
-                            fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
-                        });
-                        
                         clientDiv.innerHTML = `
                             <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
                             <h4>${name.toUpperCase()}</h4>
-                            <div class="form-row">
-                                <label>File Types to Download:</label>
-                                <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
-                                    ${fileTypeOptions}
-                                </select>
-                                <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
-                            </div>
                             <div class="form-row">
                                 <label>Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${clientConfig.magnets_folder}">
@@ -1386,12 +1339,7 @@ HTML_TEMPLATE = '''
                 if (!config.download_clients[client]) {
                     config.download_clients[client] = {};
                 }
-                if (field === 'file_types') {
-                    const selected = Array.from(input.selectedOptions).map(opt => opt.value);
-                    config.download_clients[client][field] = selected.length > 0 ? selected : ['video'];
-                } else {
-                    config.download_clients[client][field] = input.value;
-                }
+                config.download_clients[client][field] = input.value;
             });
             
             fetch('/api/config', {
@@ -1420,14 +1368,6 @@ HTML_TEMPLATE = '''
             fetch('/api/config')
                 .then(r => r.json())
                 .then(config => {
-                    const fileCategories = config.file_categories || {};
-                    let fileTypeOptions = '';
-                    Object.keys(fileCategories).forEach(category => {
-                        const extensions = fileCategories[category].join(', ');
-                        const selected = category === 'video' ? 'selected' : '';
-                        fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
-                    });
-                    
                     const baseDir = 'C:/ProgramData/Debridarr/' + name.toLowerCase();
                     
                     const clientsDiv = document.getElementById('clients-list');
@@ -1437,13 +1377,6 @@ HTML_TEMPLATE = '''
                     clientDiv.innerHTML = `
                         <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
                         <h4>${name.toUpperCase()}</h4>
-                        <div class="form-row">
-                            <label>File Types to Download:</label>
-                            <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
-                                ${fileTypeOptions}
-                            </select>
-                            <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
-                        </div>
                         <div class="form-row">
                             <label>Magnets Folder:</label>
                             <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${baseDir}/magnets">

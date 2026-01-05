@@ -23,9 +23,6 @@ class MagnetHandler(FileSystemEventHandler):
         self.in_progress_folder = in_progress_folder
         self.failed_magnets_folder = failed_magnets_folder
         self.client_name = client_name
-        self.file_types = file_types or ['video']
-        self.allowed_extensions = self._get_allowed_extensions()
-        
         # Set performance parameters
         perf_settings = {
             'low': {'workers': 1, 'chunk_size': 4096},
@@ -37,56 +34,22 @@ class MagnetHandler(FileSystemEventHandler):
         self.chunk_size = settings['chunk_size']
         
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        self.processing_files = set()
+        self.processing_files = set()  # Files currently being processed (upload phase)
+        self.downloading_files = set()  # Files currently downloading (download phase)
         self.queued_files = []  # Ordered list of queued files
+        self.ready_to_download = {}  # Files ready for download: {file_path: results}
         self.download_progress = {}  # Track progress for each magnet file
         self.file_downloads = {}  # Track individual file downloads within torrents
         self.retry_attempts = {}  # Track retry attempts for failed magnets
         self.retry_cooldown = {}  # Track cooldown timestamps for retries
         self.torrent_ids = {}  # Track torrent IDs for each magnet file
     
-    def _get_allowed_extensions(self):
-        """Get list of allowed file extensions based on configured file types"""
-        try:
-            with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            # Read file_types from config for this client
-            client_config = config.get('download_clients', {}).get(self.client_name, {})
-            file_types = client_config.get('file_types', self.file_types)
-            # If file_types is empty or None, default to video
-            if not file_types:
-                file_types = ['video']
-            
-            # Default categories
-            default_categories = {
-                'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
-                'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
-                'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
-                'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
-            }
-            categories = config.get('file_categories', default_categories)
-            
-            extensions = []
-            for file_type in file_types:
-                exts = categories.get(file_type, default_categories.get(file_type, []))
-                extensions.extend(exts)
-            logging.info(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {file_types})")
-            return extensions
-        except Exception as e:
-            logging.error(f"Error loading file extensions: {e}")
-            return ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']
-    
     def reload_file_types(self):
-        """Reload allowed extensions from config"""
+        """Reload configuration - kept for compatibility but no longer filters by file type"""
         try:
-            with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            client_config = config.get('download_clients', {}).get(self.client_name, {})
-            self.file_types = client_config.get('file_types', ['video'])
-            self.allowed_extensions = self._get_allowed_extensions()
-            logging.info(f"Reloaded file types for {self.client_name}: {self.file_types} -> {self.allowed_extensions}")
+            logging.info(f"Configuration reloaded for {self.client_name} - file type filtering disabled")
         except Exception as e:
-            logging.error(f"Error reloading file types: {e}")
+            logging.error(f"Error reloading configuration: {e}")
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -94,15 +57,11 @@ class MagnetHandler(FileSystemEventHandler):
         if not event.src_path.endswith('.magnet'):
             return
         
-        if event.src_path in self.processing_files or event.src_path in self.queued_files:
+        if event.src_path in self.processing_files or event.src_path in self.queued_files or event.src_path in self.ready_to_download:
             logging.debug(f"Already processing or queued: {event.src_path}")
             return
             
-        if len(self.processing_files) >= self.max_workers:
-            logging.info(f"Maximum concurrent downloads reached ({self.max_workers}), queuing: {event.src_path}")
-            self.queued_files.append(event.src_path)
-            return
-            
+        # Always start upload phase immediately - no limit on uploads
         logging.info(f"New magnet file detected: {event.src_path}")
         self.processing_files.add(event.src_path)
         self.download_progress[event.src_path] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
@@ -113,12 +72,30 @@ class MagnetHandler(FileSystemEventHandler):
             self.process_magnet(file_path)
         finally:
             self.processing_files.discard(file_path)
+            self.downloading_files.discard(file_path)
             self.download_progress.pop(file_path, None)
             self.file_downloads.pop(file_path, None)
             self.torrent_ids.pop(file_path, None)
+            self.ready_to_download.pop(file_path, None)
             self._process_next_queued()
     
     def process_magnet(self, file_path):
+        try:
+            # PHASE 1: Upload and cache to Real-Debrid (unlimited)
+            results = self._upload_and_cache_magnet(file_path)
+            if not results:
+                return  # Failed during upload/cache phase
+            
+            # PHASE 2: Wait for download slot and download files (limited by max_workers)
+            self._wait_and_download_files(file_path, results)
+            
+        except PermissionError as e:
+            logging.error(f"Permission denied accessing {file_path}: {e}")
+        except Exception as e:
+            logging.error(f"Error processing {file_path}: {e}")
+    
+    def _upload_and_cache_magnet(self, file_path):
+        """Phase 1: Upload magnet to Real-Debrid and wait for caching (unlimited)"""
         try:
             # Wait for file to be fully written and stable
             time.sleep(3)
@@ -126,7 +103,7 @@ class MagnetHandler(FileSystemEventHandler):
             # Check if file still exists (might have been processed by another thread)
             if not os.path.exists(file_path):
                 logging.info(f"File no longer exists, skipping: {file_path}")
-                return
+                return None
             
             # Check if magnet already processed
             filename = os.path.basename(file_path)
@@ -134,7 +111,7 @@ class MagnetHandler(FileSystemEventHandler):
             if os.path.exists(completed_magnet_path):
                 logging.info(f"Magnet already processed, removing duplicate: {filename}")
                 os.remove(file_path)
-                return
+                return None
             
             with open(file_path, 'r') as f:
                 magnet_link = f.read().strip()
@@ -142,7 +119,7 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_progress[file_path] = {'status': 'Checking existing torrents', 'progress': 5, 'cache_progress': 2, 'download_progress': 0}
             torrent_id = self.check_or_add_torrent(magnet_link, file_path)
             if not torrent_id:
-                return
+                return None
             if torrent_id == 'FAILED':
                 # Report failure and move magnet to failed folder (magnet-specific error, trigger search)
                 self.report_failure_to_arr(filename, trigger_search=True)
@@ -152,7 +129,7 @@ class MagnetHandler(FileSystemEventHandler):
                     logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
-                return
+                return None
             
             # Store torrent ID for abort handling
             self.torrent_ids[file_path] = torrent_id
@@ -168,12 +145,12 @@ class MagnetHandler(FileSystemEventHandler):
                     logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
-                return
+                return None
             
             self.download_progress[file_path] = {'status': 'Caching to Real-Debrid', 'progress': 30, 'cache_progress': 15, 'download_progress': 0}
             results = self.wait_for_torrent(torrent_id, file_path)
             if results == 'DEAD':
-                # Dead magnet (0% for 5 minutes) - delete from RD, report failure with search
+                # Dead magnet (0% for 10 minutes) - delete from RD, report failure with search
                 self.delete_torrent(torrent_id)
                 self.report_failure_to_arr(filename, trigger_search=True)
                 try:
@@ -182,10 +159,10 @@ class MagnetHandler(FileSystemEventHandler):
                     logging.info(f"Moved dead magnet: {os.path.basename(file_path)}")
                 except:
                     pass
-                return
+                return None
             if not results:
                 self.delete_torrent(torrent_id)
-                # Report failure (could be timeout, don't trigger search)
+                # Report failure (network error or other issue, don't trigger search)
                 self.report_failure_to_arr(filename, trigger_search=False)
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
@@ -193,7 +170,7 @@ class MagnetHandler(FileSystemEventHandler):
                     logging.info(f"Moved failed magnet: {os.path.basename(file_path)}")
                 except:
                     pass
-                return
+                return None
             
             # Initialize individual file progress bars
             self.file_downloads[file_path] = []
@@ -204,7 +181,28 @@ class MagnetHandler(FileSystemEventHandler):
             
             # Update progress with file count
             total_files = len(self.file_downloads[file_path])
-            self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+            self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files) - Waiting for download slot', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+            
+            return results
+            
+        except Exception as e:
+            logging.error(f"Error in upload/cache phase for {file_path}: {e}")
+            return None
+    
+    def _wait_and_download_files(self, file_path, results):
+        """Phase 2: Wait for download slot and download files (limited by max_workers)"""
+        try:
+            # Wait for a download slot
+            while len(self.downloading_files) >= self.max_workers:
+                if file_path not in self.processing_files:
+                    logging.info(f"Download aborted while waiting for slot: {file_path}")
+                    return
+                time.sleep(5)  # Check every 5 seconds for available slot
+            
+            # Got a download slot
+            self.downloading_files.add(file_path)
+            total_files = len(self.file_downloads[file_path])
+            self.download_progress[file_path] = {'status': f'Downloading files ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
             
             # Download all files from the torrent
             hoster_unavailable = False
@@ -212,7 +210,9 @@ class MagnetHandler(FileSystemEventHandler):
                 # Check if download was aborted
                 if file_path not in self.processing_files:
                     logging.info(f"Download aborted, stopping file downloads: {file_path}")
-                    self.delete_torrent(torrent_id)
+                    torrent_id = self.torrent_ids.get(file_path)
+                    if torrent_id:
+                        self.delete_torrent(torrent_id)
                     break
                 if download_link == 'HOSTER_UNAVAILABLE':
                     hoster_unavailable = True
@@ -238,7 +238,9 @@ class MagnetHandler(FileSystemEventHandler):
                     self.retry_cooldown[file_path] = time.time() + 600  # 10 minutes
                     return
             
-            self.delete_torrent(torrent_id)
+            torrent_id = self.torrent_ids.get(file_path)
+            if torrent_id:
+                self.delete_torrent(torrent_id)
             
             # Move magnet file to completed folder
             os.makedirs(self.completed_magnets_folder, exist_ok=True)
@@ -260,11 +262,9 @@ class MagnetHandler(FileSystemEventHandler):
                         time.sleep(2)
                     else:
                         logging.error(f"Failed to move magnet file after 5 attempts: {filename}")
-            
-        except PermissionError as e:
-            logging.error(f"Permission denied accessing {file_path}: {e}")
+                        
         except Exception as e:
-            logging.error(f"Error processing {file_path}: {e}")
+            logging.error(f"Error in download phase for {file_path}: {e}")
     
     def get_api_token(self):
         try:
@@ -391,7 +391,10 @@ class MagnetHandler(FileSystemEventHandler):
         
         logging.info(f"Waiting for torrent to complete: {torrent_id}")
         zero_progress_count = 0
-        for attempt in range(60):
+        attempt = 0
+        
+        while True:  # Remove hard timeout, only rely on dead magnet detection
+            attempt += 1
             response = requests.get(url, headers=headers)
             if response.status_code == 404:
                 # Torrent was deleted from Real-Debrid, re-add it
@@ -414,13 +417,14 @@ class MagnetHandler(FileSystemEventHandler):
                 status = data.get('status', 'unknown')
                 progress = data.get('progress', 0)
                 
-                # Check for dead magnet (0% progress for 5 minutes)
+                # Check for dead magnet (0% progress for 10 minutes)
                 if progress == 0 and status not in ['downloaded', 'downloading']:
                     zero_progress_count += 1
-                    if zero_progress_count >= 30:  # 30 attempts * 10 seconds = 5 minutes
-                        logging.error(f"Torrent {torrent_id} stuck at 0% for 5 minutes, marking as dead")
+                    if zero_progress_count >= 60:  # 60 attempts * 10 seconds = 10 minutes
+                        logging.error(f"Torrent {torrent_id} stuck at 0% for 10 minutes, marking as dead")
                         return 'DEAD'
                 else:
+                    # Reset counter if progress > 0% - torrent is active
                     zero_progress_count = 0
                 
                 if attempt % 6 == 0:  # Log every minute
@@ -443,9 +447,6 @@ class MagnetHandler(FileSystemEventHandler):
                         results.append((self.unrestrict_link(link), filename))
                     return results
             time.sleep(10)
-        
-        logging.error(f"Torrent {torrent_id} not ready after 10 minutes")
-        return None
     
     def get_filename_from_link(self, link):
         """Extract filename from Real Debrid link"""
@@ -464,24 +465,14 @@ class MagnetHandler(FileSystemEventHandler):
         return self.sanitize_filename(filename) if filename else 'download'
     
     def sanitize_filename(self, filename):
-        """Ensure filename has proper extension and length"""
+        """Ensure filename has proper length"""
         if not filename:
             return 'download'
             
-        # Get file extension
-        name, ext = os.path.splitext(filename)
-        
-        # Ensure we have an extension for allowed file types
-        if not ext and any(allowed_ext in filename.lower() for allowed_ext in self.allowed_extensions):
-            for allowed_ext in self.allowed_extensions:
-                if allowed_ext in filename.lower():
-                    ext = allowed_ext
-                    name = filename.lower().split(allowed_ext)[0]
-                    break
-        
-        # Limit filename length while preserving extension
+        # Limit filename length
         max_length = 200  # Windows path limit consideration
         if len(filename) > max_length:
+            name, ext = os.path.splitext(filename)
             name = name[:max_length - len(ext)]
             filename = name + ext
             
@@ -577,14 +568,6 @@ class MagnetHandler(FileSystemEventHandler):
             
             # Ensure file is fully written before moving
             time.sleep(2)
-            
-            # Check if file extension is allowed
-            allowed_exts = self._get_allowed_extensions()
-            _, ext = os.path.splitext(filename.lower())
-            if ext not in allowed_exts:
-                logging.info(f"Skipping file (not in allowed types): {filename} (extension: {ext})")
-                os.remove(temp_path)
-                return
             
             # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
@@ -711,13 +694,8 @@ class MagnetHandler(FileSystemEventHandler):
             logging.debug(f"Error triggering search in {self.client_name}: {e}")
     
     def _process_next_queued(self):
-        if self.queued_files and len(self.processing_files) < self.max_workers:
-            next_file = self.queued_files.pop(0)
-            if os.path.exists(next_file):
-                logging.info(f"Processing queued magnet: {next_file}")
-                self.processing_files.add(next_file)
-                self.download_progress[next_file] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
-                self.executor.submit(self._process_magnet_wrapper, next_file)
+        # No longer needed since we don't queue uploads, only downloads are limited
+        pass
     
     def move_queue_item(self, file_path, direction):
         if file_path not in self.queued_files:
@@ -741,8 +719,8 @@ def process_existing_magnets(magnets_folder, handler):
         for filename in magnet_files:
             file_path = os.path.join(magnets_folder, filename)
             
-            if file_path in handler.processing_files or file_path in handler.queued_files:
-                logging.debug(f"Already processing or queued: {filename}")
+            if file_path in handler.processing_files or file_path in handler.ready_to_download:
+                logging.debug(f"Already processing: {filename}")
                 continue
             
             # Check if file is in cooldown
@@ -752,18 +730,13 @@ def process_existing_magnets(magnets_folder, handler):
                 else:
                     handler.retry_cooldown.pop(file_path, None)
                 
-            if len(handler.processing_files) >= handler.max_workers:
-                logging.debug(f"Maximum concurrent downloads reached ({handler.max_workers}), queuing: {filename}")
-                if file_path not in handler.queued_files:
-                    handler.queued_files.append(file_path)
-                continue
-                
             # Check if file is accessible
             try:
                 with open(file_path, 'r') as f:
                     pass  # Just test if we can open it
-                logging.info(f"Queuing existing magnet: {filename}")
+                logging.info(f"Processing existing magnet: {filename}")
                 handler.processing_files.add(file_path)
+                handler.download_progress[file_path] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
                 handler.executor.submit(handler._process_magnet_wrapper, file_path)
             except PermissionError:
                 logging.warning(f"Skipping locked file: {filename}")
@@ -801,12 +774,11 @@ def setup_handlers(config_path, observer):
         os.makedirs(completed_downloads_folder, exist_ok=True)
         os.makedirs(failed_magnets_folder, exist_ok=True)
         
-        # Get performance mode and file types
+        # Get performance mode - file_types parameter removed
         performance_mode = config.get('performance_mode', 'medium')
-        file_types = client_config.get('file_types', ['video'])
         
         # Create handler
-        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name, file_types)
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name)
         handlers.append((client_name, handler, magnets_folder))
         
         # Schedule observer

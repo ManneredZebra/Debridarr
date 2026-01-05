@@ -41,6 +41,8 @@ def open_web_ui():
     os.system('start http://127.0.0.1:3636')
 
 def quit_action(icon, item):
+    logging.info("Quit requested from tray icon")
+    shutdown_event.set()
     icon.stop()
 
 def main():
@@ -78,9 +80,15 @@ def main():
         )
     )
     
-    icon.run()
-    shutdown_event.set()
-    os._exit(0)
+    try:
+        icon.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutdown_event.set()
+        # Give threads time to shut down gracefully
+        time.sleep(2)
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
