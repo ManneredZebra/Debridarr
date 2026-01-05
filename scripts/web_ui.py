@@ -418,6 +418,14 @@ class WebUI:
                 if 'real_debrid_api_token' in config:
                     token = config['real_debrid_api_token']
                     config['real_debrid_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
+                # Ensure file_categories exists
+                if 'file_categories' not in config:
+                    config['file_categories'] = {
+                        'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+                        'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+                        'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+                        'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+                    }
                 return jsonify(config)
             except Exception as e:
                 return jsonify({'error': str(e)})
@@ -465,10 +473,22 @@ class WebUI:
                 with open(self.config_path, 'r') as f:
                     existing_config = yaml.safe_load(f)
                 
-                # If API token ends with '...', keep the existing one
+                # If API token ends with '...' or contains '...', keep the existing one
                 if 'real_debrid_api_token' in new_config:
-                    if new_config['real_debrid_api_token'].endswith('...'):
+                    if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
+                
+                # Ensure file_categories exists
+                if 'file_categories' not in new_config:
+                    if 'file_categories' in existing_config:
+                        new_config['file_categories'] = existing_config['file_categories']
+                    else:
+                        new_config['file_categories'] = {
+                            'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+                            'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+                            'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+                            'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+                        }
                 
                 # Write updated config
                 with open(self.config_path, 'w') as f:
@@ -1272,13 +1292,31 @@ HTML_TEMPLATE = '''
                     const clientsDiv = document.createElement('div');
                     clientsDiv.id = 'clients-list';
                     
+                    const fileCategories = config.file_categories || {};
+                    
                     Object.entries(config.download_clients || {}).forEach(([name, clientConfig]) => {
                         const clientDiv = document.createElement('div');
                         clientDiv.className = 'settings-group';
                         clientDiv.style.background = '#3d3d3d';
+                        
+                        const selectedTypes = clientConfig.file_types || ['video'];
+                        let fileTypeOptions = '';
+                        Object.keys(fileCategories).forEach(category => {
+                            const extensions = fileCategories[category].join(', ');
+                            const selected = selectedTypes.includes(category) ? 'selected' : '';
+                            fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
+                        });
+                        
                         clientDiv.innerHTML = `
                             <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
                             <h4>${name.toUpperCase()}</h4>
+                            <div class="form-row">
+                                <label>File Types to Download:</label>
+                                <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
+                                    ${fileTypeOptions}
+                                </select>
+                                <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
+                            </div>
                             <div class="form-row">
                                 <label>Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${clientConfig.magnets_folder}">
@@ -1348,7 +1386,12 @@ HTML_TEMPLATE = '''
                 if (!config.download_clients[client]) {
                     config.download_clients[client] = {};
                 }
-                config.download_clients[client][field] = input.value;
+                if (field === 'file_types') {
+                    const selected = Array.from(input.selectedOptions).map(opt => opt.value);
+                    config.download_clients[client][field] = selected.length > 0 ? selected : ['video'];
+                } else {
+                    config.download_clients[client][field] = input.value;
+                }
             });
             
             fetch('/api/config', {
@@ -1374,46 +1417,65 @@ HTML_TEMPLATE = '''
             const name = prompt('Enter client name (e.g., lidarr, readarr):');
             if (!name) return;
             
-            const baseDir = 'C:/Users/' + (prompt('Enter your Windows username:') || 'YourUser') + '/AppData/Local/Debridarr/content/' + name.toLowerCase();
-            
-            const clientsDiv = document.getElementById('clients-list');
-            const clientDiv = document.createElement('div');
-            clientDiv.className = 'settings-group';
-            clientDiv.style.background = '#3d3d3d';
-            clientDiv.innerHTML = `
-                <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
-                <h4>${name.toUpperCase()}</h4>
-                <div class="form-row">
-                    <label>Magnets Folder:</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${baseDir}/magnets">
-                </div>
-                <div class="form-row">
-                    <label>In Progress Folder:</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="in_progress_folder" value="${baseDir}/in_progress">
-                </div>
-                <div class="form-row">
-                    <label>Completed Magnets Folder:</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="completed_magnets_folder" value="${baseDir}/completed_magnets">
-                </div>
-                <div class="form-row">
-                    <label>Completed Downloads Folder:</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${baseDir}/completed_downloads">
-                </div>
-                <div class="form-row">
-                    <label>Failed Magnets Folder:</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${baseDir}/failed_magnets">
-                </div>
-                <div class="form-row">
-                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
-                    <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="" placeholder="http://localhost:8989 or http://localhost:7878">
-                </div>
-                <div class="form-row">
-                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
-                    <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
-                    <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
-                </div>
-            `;
-            clientsDiv.appendChild(clientDiv);
+            fetch('/api/config')
+                .then(r => r.json())
+                .then(config => {
+                    const fileCategories = config.file_categories || {};
+                    let fileTypeOptions = '';
+                    Object.keys(fileCategories).forEach(category => {
+                        const extensions = fileCategories[category].join(', ');
+                        const selected = category === 'video' ? 'selected' : '';
+                        fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
+                    });
+                    
+                    const baseDir = 'C:/ProgramData/Debridarr/' + name.toLowerCase();
+                    
+                    const clientsDiv = document.getElementById('clients-list');
+                    const clientDiv = document.createElement('div');
+                    clientDiv.className = 'settings-group';
+                    clientDiv.style.background = '#3d3d3d';
+                    clientDiv.innerHTML = `
+                        <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
+                        <h4>${name.toUpperCase()}</h4>
+                        <div class="form-row">
+                            <label>File Types to Download:</label>
+                            <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
+                                ${fileTypeOptions}
+                            </select>
+                            <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
+                        </div>
+                        <div class="form-row">
+                            <label>Magnets Folder:</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${baseDir}/magnets">
+                        </div>
+                        <div class="form-row">
+                            <label>In Progress Folder:</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="in_progress_folder" value="${baseDir}/in_progress">
+                        </div>
+                        <div class="form-row">
+                            <label>Completed Magnets Folder:</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="completed_magnets_folder" value="${baseDir}/completed_magnets">
+                        </div>
+                        <div class="form-row">
+                            <label>Completed Downloads Folder:</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="completed_downloads_folder" value="${baseDir}/completed_downloads">
+                        </div>
+                        <div class="form-row">
+                            <label>Failed Magnets Folder:</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${baseDir}/failed_magnets">
+                        </div>
+                        <div class="form-row">
+                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
+                            <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="" placeholder="http://localhost:8989 or http://localhost:7878">
+                        </div>
+                        <div class="form-row">
+                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
+                            <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
+                            <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
+                        </div>
+                    `;
+                    clientsDiv.appendChild(clientDiv);
+                });
         }
 
         function removeClient(name) {

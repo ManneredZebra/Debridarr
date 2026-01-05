@@ -15,7 +15,7 @@ from logging.handlers import RotatingFileHandler
 from web_ui import WebUI
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode='medium', client_name=''):
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode='medium', client_name='', file_types=None):
         self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
@@ -23,6 +23,8 @@ class MagnetHandler(FileSystemEventHandler):
         self.in_progress_folder = in_progress_folder
         self.failed_magnets_folder = failed_magnets_folder
         self.client_name = client_name
+        self.file_types = file_types or ['video']
+        self.allowed_extensions = self._get_allowed_extensions()
         
         # Set performance parameters
         perf_settings = {
@@ -42,6 +44,49 @@ class MagnetHandler(FileSystemEventHandler):
         self.retry_attempts = {}  # Track retry attempts for failed magnets
         self.retry_cooldown = {}  # Track cooldown timestamps for retries
         self.torrent_ids = {}  # Track torrent IDs for each magnet file
+    
+    def _get_allowed_extensions(self):
+        """Get list of allowed file extensions based on configured file types"""
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            # Read file_types from config for this client
+            client_config = config.get('download_clients', {}).get(self.client_name, {})
+            file_types = client_config.get('file_types', self.file_types)
+            # If file_types is empty or None, default to video
+            if not file_types:
+                file_types = ['video']
+            
+            # Default categories
+            default_categories = {
+                'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
+                'audio': ['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.wma'],
+                'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
+                'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
+            }
+            categories = config.get('file_categories', default_categories)
+            
+            extensions = []
+            for file_type in file_types:
+                exts = categories.get(file_type, default_categories.get(file_type, []))
+                extensions.extend(exts)
+            logging.info(f"Allowed extensions for {self.client_name}: {extensions} (file_types: {file_types})")
+            return extensions
+        except Exception as e:
+            logging.error(f"Error loading file extensions: {e}")
+            return ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']
+    
+    def reload_file_types(self):
+        """Reload allowed extensions from config"""
+        try:
+            with open(self.config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            client_config = config.get('download_clients', {}).get(self.client_name, {})
+            self.file_types = client_config.get('file_types', ['video'])
+            self.allowed_extensions = self._get_allowed_extensions()
+            logging.info(f"Reloaded file types for {self.client_name}: {self.file_types} -> {self.allowed_extensions}")
+        except Exception as e:
+            logging.error(f"Error reloading file types: {e}")
         
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
@@ -426,12 +471,12 @@ class MagnetHandler(FileSystemEventHandler):
         # Get file extension
         name, ext = os.path.splitext(filename)
         
-        # Ensure we have an extension for video files
-        if not ext and any(vid_ext in filename.lower() for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']):
-            for vid_ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv']:
-                if vid_ext in filename.lower():
-                    ext = vid_ext
-                    name = filename.lower().split(vid_ext)[0]
+        # Ensure we have an extension for allowed file types
+        if not ext and any(allowed_ext in filename.lower() for allowed_ext in self.allowed_extensions):
+            for allowed_ext in self.allowed_extensions:
+                if allowed_ext in filename.lower():
+                    ext = allowed_ext
+                    name = filename.lower().split(allowed_ext)[0]
                     break
         
         # Limit filename length while preserving extension
@@ -468,20 +513,13 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             logging.info(f"Starting download from: {download_url}")
             
-            # Get filename from URL if rd_filename is not a proper filename
-            if not rd_filename or not any(ext in rd_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']):
-                # Extract filename from URL
+            # Get filename from URL if not provided
+            if not rd_filename:
                 url_filename = download_url.split('/')[-1].split('?')[0]
                 if '%' in url_filename:
                     import urllib.parse
                     url_filename = urllib.parse.unquote(url_filename)
-                
-                # Use URL filename if it's a video file
-                if any(ext in url_filename.lower() for ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm']) and not url_filename.lower().endswith('.rartv'):
-                    rd_filename = url_filename
-                else:
-                    logging.info(f"Skipping non-video file: {rd_filename or url_filename}")
-                    return
+                rd_filename = url_filename
                 
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
@@ -539,6 +577,14 @@ class MagnetHandler(FileSystemEventHandler):
             
             # Ensure file is fully written before moving
             time.sleep(2)
+            
+            # Check if file extension is allowed
+            allowed_exts = self._get_allowed_extensions()
+            _, ext = os.path.splitext(filename.lower())
+            if ext not in allowed_exts:
+                logging.info(f"Skipping file (not in allowed types): {filename} (extension: {ext})")
+                os.remove(temp_path)
+                return
             
             # Move to completed folder after download finishes with retry logic
             os.makedirs(self.completed_folder, exist_ok=True)
@@ -755,11 +801,12 @@ def setup_handlers(config_path, observer):
         os.makedirs(completed_downloads_folder, exist_ok=True)
         os.makedirs(failed_magnets_folder, exist_ok=True)
         
-        # Get performance mode
+        # Get performance mode and file types
         performance_mode = config.get('performance_mode', 'medium')
+        file_types = client_config.get('file_types', ['video'])
         
         # Create handler
-        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name)
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name, file_types)
         handlers.append((client_name, handler, magnets_folder))
         
         # Schedule observer
@@ -1106,7 +1153,12 @@ def main(shutdown_event=None):
         nonlocal handlers
         logging.info("Reloading configuration...")
         time.sleep(1)  # Brief delay to ensure config is written
+        # Reload file types for existing handlers
+        for client_name, handler, magnets_folder in handlers:
+            handler.reload_file_types()
+        # Setup new handlers (for new clients)
         handlers = setup_handlers(config_path, observer)
+        web_ui.handlers = handlers  # Update WebUI's handlers reference
         logging.info("Configuration reloaded successfully")
     
     # Process existing magnet files for all clients
