@@ -442,8 +442,19 @@ class MagnetHandler(FileSystemEventHandler):
                     links = data.get('links', [])
                     files = data.get('files', [])
                     results = []
+                    
+                    logging.info(f"Processing {len(links)} links and {len(files)} files from torrent")
+                    
                     for i, link in enumerate(links):
-                        filename = files[i]['path'].split('/')[-1] if i < len(files) else self.get_filename_from_link(link)
+                        if i < len(files) and files[i].get('path'):
+                            # Use the original filename from the torrent file list
+                            filename = files[i]['path'].split('/')[-1]
+                            logging.info(f"Using torrent filename for link {i}: {filename}")
+                        else:
+                            # Fallback to extracting from link (should be rare)
+                            filename = self.get_filename_from_link(link)
+                            logging.warning(f"Had to extract filename from link {i}: {filename}")
+                        
                         results.append((self.unrestrict_link(link), filename))
                     return results
             time.sleep(10)
@@ -464,19 +475,31 @@ class MagnetHandler(FileSystemEventHandler):
         filename = link.split('/')[-1].split('?')[0]
         return self.sanitize_filename(filename) if filename else 'download'
     
-    def sanitize_filename(self, filename):
-        """Ensure filename has proper length"""
+    def basic_sanitize_filename(self, filename):
+        """Basic filename sanitization - only remove dangerous characters and limit length, preserve extension"""
         if not filename:
             return 'download'
-            
-        # Limit filename length
+        
+        # Remove or replace dangerous characters for Windows/filesystem compatibility
+        import re
+        # Replace dangerous characters with underscores
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        # Remove control characters
+        filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
+        
+        # Limit filename length while preserving extension
         max_length = 200  # Windows path limit consideration
         if len(filename) > max_length:
             name, ext = os.path.splitext(filename)
-            name = name[:max_length - len(ext)]
+            # Keep the extension, truncate the name part
+            name = name[:max_length - len(ext) - 1]  # -1 for safety
             filename = name + ext
             
         return filename
+    
+    def sanitize_filename(self, filename):
+        """Legacy method - now just calls basic_sanitize_filename"""
+        return self.basic_sanitize_filename(filename)
     
     def unrestrict_link(self, link):
         api_token = self.get_api_token()
@@ -504,30 +527,41 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             logging.info(f"Starting download from: {download_url}")
             
-            # Get filename from URL if not provided
-            if not rd_filename:
-                url_filename = download_url.split('/')[-1].split('?')[0]
-                if '%' in url_filename:
-                    import urllib.parse
-                    url_filename = urllib.parse.unquote(url_filename)
-                rd_filename = url_filename
-                
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # Use provided filename or extract from headers/URL
-            filename = rd_filename
-            if not filename:
+            # Use the provided filename from torrent if available, otherwise extract from response
+            if rd_filename:
+                # Use the filename from the torrent file list - this is the correct original filename
+                filename = rd_filename
+                logging.info(f"Using torrent filename: {filename}")
+            else:
+                # Fallback: try to get filename from headers or URL
+                filename = None
                 cd_header = response.headers.get('content-disposition', '')
                 if 'filename=' in cd_header:
                     filename = cd_header.split('filename=')[-1].strip('"').strip("'")
-            if not filename:
-                filename = download_url.split('/')[-1].split('?')[0]
-            if not filename:
-                filename = 'download'
+                
+                if not filename:
+                    url_filename = download_url.split('/')[-1].split('?')[0]
+                    if '%' in url_filename:
+                        import urllib.parse
+                        url_filename = urllib.parse.unquote(url_filename)
+                    filename = url_filename
+                
+                if not filename:
+                    filename = 'download'
+                
+                logging.info(f"Using extracted filename: {filename}")
             
-            # Sanitize filename
-            filename = self.sanitize_filename(filename)
+            # Only do basic filename sanitization (remove dangerous characters, limit length)
+            original_filename = filename
+            filename = self.basic_sanitize_filename(filename)
+            
+            if original_filename != filename:
+                logging.info(f"Filename sanitized: '{original_filename}' -> '{filename}'")
+            else:
+                logging.info(f"Using filename as-is: '{filename}'")
             
             # Download to configured in_progress folder first
             os.makedirs(self.in_progress_folder, exist_ok=True)
