@@ -530,10 +530,6 @@ class MagnetHandler(FileSystemEventHandler):
                     
                     logging.info(f"Processing {len(links)} links and {len(files)} files from torrent")
                     
-                    # Log the raw data to understand the structure
-                    logging.info(f"Raw torrent data - Links: {links}")
-                    logging.info(f"Raw torrent data - Files: {files}")
-                    
                     # Try different approaches to match links with filenames
                     if len(links) == len(files):
                         # If same length, try index matching but with validation
@@ -738,21 +734,38 @@ class MagnetHandler(FileSystemEventHandler):
             # Check if file is a compressed archive and extract it before moving to completed folder
             if self.auto_extract and self.is_archive_file(temp_path):
                 logging.info(f"Detected archive file, attempting extraction: {temp_path}")
-                extraction_success = self.extract_archive_to_completed(temp_path, self.completed_folder)
-                if extraction_success:
-                    logging.info(f"Archive extracted successfully to completed folder, removing original: {temp_path}")
-                    try:
-                        os.remove(temp_path)
-                        # Mark file as completed
-                        if file_index is not None and file_path and file_path in self.file_downloads:
-                            if file_index < len(self.file_downloads[file_path]):
-                                self.file_downloads[file_path][file_index]['progress'] = 100
-                                self.file_downloads[file_path][file_index]['status'] = 'Extracted'
-                        return  # Don't move the original file since we extracted it
-                    except Exception as e:
-                        logging.warning(f"Failed to remove original archive: {e}")
+                
+                # Validate archive before extraction
+                if not self.validate_archive(temp_path):
+                    logging.warning(f"Archive validation failed, treating as regular file: {temp_path}")
                 else:
-                    logging.warning(f"Archive extraction failed, moving original to completed folder: {temp_path}")
+                    extraction_success = self.extract_archive_to_completed(temp_path, self.completed_folder)
+                    if extraction_success:
+                        logging.info(f"Archive extracted successfully to completed folder, removing original: {temp_path}")
+                        try:
+                            os.remove(temp_path)
+                            # Mark file as completed
+                            if file_index is not None and file_path and file_path in self.file_downloads:
+                                if file_index < len(self.file_downloads[file_path]):
+                                    self.file_downloads[file_path][file_index]['progress'] = 100
+                                    self.file_downloads[file_path][file_index]['status'] = 'Extracted'
+                            return  # Don't move the original file since we extracted it
+                        except Exception as e:
+                            logging.warning(f"Failed to remove original archive: {e}")
+                    else:
+                        logging.warning(f"Archive extraction failed, moving original to completed folder: {temp_path}")
+                        # Still remove the failed archive from in_progress to avoid clutter
+                        try:
+                            failed_archive_path = os.path.join(self.completed_folder, f"FAILED_EXTRACT_{filename}")
+                            os.rename(temp_path, failed_archive_path)
+                            logging.info(f"Moved failed archive to: {failed_archive_path}")
+                            if file_index is not None and file_path and file_path in self.file_downloads:
+                                if file_index < len(self.file_downloads[file_path]):
+                                    self.file_downloads[file_path][file_index]['progress'] = 100
+                                    self.file_downloads[file_path][file_index]['status'] = 'Failed Extraction'
+                            return
+                        except Exception as e:
+                            logging.error(f"Failed to move failed archive: {e}")
             
             # Check if file already exists in completed folder
             if os.path.exists(final_path):
@@ -809,6 +822,50 @@ class MagnetHandler(FileSystemEventHandler):
         
         file_lower = file_path.lower()
         return any(file_lower.endswith(ext) for ext in archive_extensions)
+    
+    def validate_archive(self, archive_path):
+        """Validate archive file before extraction to avoid corrupted/fake files"""
+        try:
+            file_size = os.path.getsize(archive_path)
+            
+            # Skip very small files (likely fake)
+            if file_size < 1024:  # Less than 1KB
+                logging.warning(f"Archive too small ({file_size} bytes), likely fake: {archive_path}")
+                return False
+            
+            # Check for suspicious executable content in what should be media archives
+            filename = os.path.basename(archive_path).lower()
+            if any(suspicious in filename for suspicious in ['.exe', '.bat', '.cmd', '.scr', '.com']):
+                logging.warning(f"Archive contains suspicious executable reference: {archive_path}")
+                return False
+            
+            # Basic file header validation
+            with open(archive_path, 'rb') as f:
+                header = f.read(10)
+                
+                # ZIP file signature
+                if archive_path.lower().endswith('.zip'):
+                    if not header.startswith(b'PK'):
+                        logging.warning(f"Invalid ZIP header: {archive_path}")
+                        return False
+                
+                # RAR file signature
+                elif archive_path.lower().endswith('.rar'):
+                    if not (header.startswith(b'Rar!') or header.startswith(b'RE~^')):
+                        logging.warning(f"Invalid RAR header: {archive_path}")
+                        return False
+                
+                # 7z file signature
+                elif archive_path.lower().endswith('.7z'):
+                    if not header.startswith(b'7z\xbc\xaf\x27\x1c'):
+                        logging.warning(f"Invalid 7z header: {archive_path}")
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Archive validation error: {e}")
+            return False
     
     def extract_archive(self, archive_path):
         """Extract archive file to the same directory and return success status"""
@@ -868,7 +925,7 @@ class MagnetHandler(FileSystemEventHandler):
         try:
             import subprocess
             
-            # Try to use unrar command
+            # Try to use unrar command first (more reliable)
             os.makedirs(extract_dir, exist_ok=True)
             
             # Try different unrar commands
@@ -876,13 +933,24 @@ class MagnetHandler(FileSystemEventHandler):
             
             for cmd in unrar_commands:
                 try:
-                    result = subprocess.run([cmd, 'x', '-y', archive_path, extract_dir], 
+                    # Use -o+ to overwrite files and -inul to reduce output
+                    result = subprocess.run([cmd, 'x', '-y', '-o+', '-inul', archive_path, extract_dir], 
                                           capture_output=True, text=True, timeout=300)
                     if result.returncode == 0:
                         logging.info(f"RAR extraction completed: {archive_path} -> {extract_dir}")
                         return True
                     else:
-                        logging.warning(f"RAR extraction failed with {cmd}: {result.stderr}")
+                        error_msg = result.stderr.strip() or result.stdout.strip()
+                        logging.warning(f"RAR extraction failed with {cmd}: {error_msg}")
+                        
+                        # Check for specific error types
+                        if 'CRC failed' in error_msg or 'checksum error' in error_msg.lower():
+                            logging.error(f"RAR file appears corrupted (CRC failure): {archive_path}")
+                            return False
+                        elif 'password' in error_msg.lower():
+                            logging.error(f"RAR file is password protected: {archive_path}")
+                            return False
+                            
                 except FileNotFoundError:
                     continue
                 except subprocess.TimeoutExpired:
@@ -892,15 +960,44 @@ class MagnetHandler(FileSystemEventHandler):
             # If unrar is not available, try Python rarfile library
             try:
                 import rarfile
+                
+                # Configure rarfile to be more permissive with CRC errors
+                rarfile.UNRAR_TOOL = None  # Force use of Python implementation if available
+                
                 with rarfile.RarFile(archive_path) as rf:
+                    # Check if password protected
+                    if rf.needs_password():
+                        logging.error(f"RAR file is password protected: {archive_path}")
+                        return False
+                    
+                    # Test the archive first
+                    try:
+                        rf.testrar()
+                    except rarfile.BadRarFile as e:
+                        if 'CRC' in str(e) or 'checksum' in str(e).lower():
+                            logging.error(f"RAR file corrupted (CRC failure): {archive_path} - {e}")
+                            return False
+                        else:
+                            logging.warning(f"RAR file test failed, attempting extraction anyway: {e}")
+                    
+                    # Extract files
                     rf.extractall(extract_dir)
+                    
                 logging.info(f"RAR extraction completed with rarfile: {archive_path} -> {extract_dir}")
                 return True
+                
             except ImportError:
                 logging.warning("RAR extraction failed: unrar command and rarfile library not available")
                 return False
+            except rarfile.BadRarFile as e:
+                logging.error(f"RAR file is corrupted or invalid: {archive_path} - {e}")
+                return False
             except Exception as e:
-                logging.error(f"RAR extraction failed with rarfile: {e}")
+                error_str = str(e)
+                if 'CRC' in error_str or 'checksum' in error_str.lower():
+                    logging.error(f"RAR extraction failed due to corruption: {archive_path} - {e}")
+                else:
+                    logging.error(f"RAR extraction failed with rarfile: {archive_path} - {e}")
                 return False
                 
         except Exception as e:
