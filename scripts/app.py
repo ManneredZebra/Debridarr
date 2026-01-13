@@ -15,7 +15,7 @@ from logging.handlers import RotatingFileHandler
 from web_ui import WebUI
 
 class MagnetHandler(FileSystemEventHandler):
-    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode='medium', client_name='', file_types=None):
+    def __init__(self, config_path, completed_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode='medium', client_name='', file_types=None, auto_extract=True):
         self.config_path = config_path
         self.completed_folder = completed_folder
         self.magnets_folder = magnets_folder
@@ -23,6 +23,7 @@ class MagnetHandler(FileSystemEventHandler):
         self.in_progress_folder = in_progress_folder
         self.failed_magnets_folder = failed_magnets_folder
         self.client_name = client_name
+        self.auto_extract = auto_extract
         # Set performance parameters
         perf_settings = {
             'low': {'workers': 1, 'chunk_size': 4096},
@@ -36,7 +37,6 @@ class MagnetHandler(FileSystemEventHandler):
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.processing_files = set()  # Files currently being processed (upload phase)
         self.downloading_files = set()  # Files currently downloading (download phase)
-        self.queued_files = []  # Ordered list of queued files
         self.ready_to_download = {}  # Files ready for download: {file_path: results}
         self.download_progress = {}  # Track progress for each magnet file
         self.file_downloads = {}  # Track individual file downloads within torrents
@@ -54,18 +54,27 @@ class MagnetHandler(FileSystemEventHandler):
     def on_created(self, event):
         if hasattr(event, 'is_directory') and event.is_directory:
             return
-        if not event.src_path.endswith('.magnet'):
+        if not (event.src_path.endswith('.magnet') or event.src_path.endswith('.torrent')):
             return
         
-        if event.src_path in self.processing_files or event.src_path in self.queued_files or event.src_path in self.ready_to_download:
-            logging.debug(f"Already processing or queued: {event.src_path}")
+        logging.info(f"File watcher detected new file: {event.src_path}")
+        
+        if event.src_path in self.processing_files or event.src_path in self.ready_to_download:
+            logging.debug(f"Already processing: {event.src_path}")
             return
             
         # Always start upload phase immediately - no limit on uploads
-        logging.info(f"New magnet file detected: {event.src_path}")
+        logging.info(f"New magnet/torrent file detected: {event.src_path}")
         self.processing_files.add(event.src_path)
         self.download_progress[event.src_path] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
-        self.executor.submit(self._process_magnet_wrapper, event.src_path)
+        
+        try:
+            self.executor.submit(self._process_magnet_wrapper, event.src_path)
+            logging.info(f"Submitted file to executor: {event.src_path}")
+        except Exception as e:
+            logging.error(f"Failed to submit file to executor: {e}")
+            self.processing_files.discard(event.src_path)
+            self.download_progress.pop(event.src_path, None)
     
     def _process_magnet_wrapper(self, file_path):
         try:
@@ -113,11 +122,28 @@ class MagnetHandler(FileSystemEventHandler):
                 os.remove(file_path)
                 return None
             
-            with open(file_path, 'r') as f:
-                magnet_link = f.read().strip()
+            logging.info(f"Reading content from file: {file_path}")
             
-            self.download_progress[file_path] = {'status': 'Checking existing torrents', 'progress': 5, 'cache_progress': 2, 'download_progress': 0}
-            torrent_id = self.check_or_add_torrent(magnet_link, file_path)
+            # Determine if this is a magnet link or torrent file
+            if file_path.endswith('.magnet'):
+                # Read magnet link from file
+                with open(file_path, 'r') as f:
+                    magnet_link = f.read().strip()
+                logging.info(f"Magnet link read successfully, length: {len(magnet_link)}")
+                
+                self.download_progress[file_path] = {'status': 'Checking existing torrents', 'progress': 5, 'cache_progress': 2, 'download_progress': 0}
+                torrent_id = self.check_or_add_torrent(magnet_link, file_path)
+                
+            elif file_path.endswith('.torrent'):
+                # Upload torrent file directly
+                logging.info(f"Processing torrent file: {file_path}")
+                
+                self.download_progress[file_path] = {'status': 'Uploading torrent file', 'progress': 5, 'cache_progress': 2, 'download_progress': 0}
+                torrent_id = self.add_torrent_file(file_path)
+                
+            else:
+                logging.error(f"Unsupported file type: {file_path}")
+                return None
             if not torrent_id:
                 return None
             if torrent_id == 'FAILED':
@@ -355,6 +381,65 @@ class MagnetHandler(FileSystemEventHandler):
             logging.error(f"Network error adding torrent: {e}")
             return None
     
+    def add_torrent_file(self, file_path):
+        """Upload a .torrent file to Real-Debrid"""
+        try:
+            api_token = self.get_api_token()
+            if not api_token:
+                logging.error("No API token available")
+                return None
+                
+            # Use the correct endpoint for torrent file uploads
+            url = "https://api.real-debrid.com/rest/1.0/torrents/addTorrent"
+            headers = {
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/x-bittorrent"
+            }
+            
+            # Read the torrent file as raw binary data and send directly in request body
+            with open(file_path, 'rb') as f:
+                torrent_data = f.read()
+                
+                logging.debug(f"Adding torrent file to Real Debrid as raw data: {file_path}")
+                # Send raw torrent data in the request body
+                response = requests.put(url, headers=headers, data=torrent_data, timeout=30)
+            
+            if response.status_code == 201:
+                torrent_id = response.json()['id']
+                logging.info(f"Torrent file added successfully: {torrent_id}")
+                return torrent_id
+            elif response.status_code == 429:
+                logging.warning("Rate limit exceeded, waiting 1 minute...")
+                time.sleep(60)
+                return None
+            else:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get('error_code')
+                    error_details = error_data.get('error_details', '')
+                    if error_code == 35:
+                        logging.error(f"Infringing file detected: {response.text}")
+                        return 'FAILED'
+                    elif error_code == 2:
+                        logging.error(f"Invalid torrent file parameter: {error_details}")
+                        return 'FAILED'
+                    elif error_code == 30:
+                        logging.error(f"Torrent file format error: {error_details}")
+                        return 'FAILED'
+                    elif error_code in [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34]:
+                        logging.error(f"Real-Debrid error {error_code}: {response.text}")
+                        return 'FAILED'
+                except:
+                    pass
+                logging.error(f"Failed to add torrent file (status {response.status_code}): {response.text}")
+                return 'FAILED'
+        except requests.RequestException as e:
+            logging.error(f"Network error adding torrent file: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"Error reading torrent file {file_path}: {e}")
+            return None
+    
     def select_files(self, torrent_id):
         api_token = self.get_api_token()
         if not api_token:
@@ -445,35 +530,78 @@ class MagnetHandler(FileSystemEventHandler):
                     
                     logging.info(f"Processing {len(links)} links and {len(files)} files from torrent")
                     
-                    for i, link in enumerate(links):
-                        if i < len(files) and files[i].get('path'):
-                            # Use the original filename from the torrent file list
-                            filename = files[i]['path'].split('/')[-1]
-                            logging.info(f"Using torrent filename for link {i}: {filename}")
-                        else:
-                            # Fallback to extracting from link (should be rare)
-                            filename = self.get_filename_from_link(link)
-                            logging.warning(f"Had to extract filename from link {i}: {filename}")
+                    # Log the raw data to understand the structure
+                    logging.info(f"Raw torrent data - Links: {links}")
+                    logging.info(f"Raw torrent data - Files: {files}")
+                    
+                    # Try different approaches to match links with filenames
+                    if len(links) == len(files):
+                        # If same length, try index matching but with validation
+                        logging.info("Same number of links and files, using index matching")
+                        for i, link in enumerate(links):
+                            if files[i].get('path'):
+                                filename = files[i]['path'].split('/')[-1]
+                                file_size = files[i].get('bytes', 0)
+                                logging.info(f"Link {i}: {filename} ({file_size} bytes)")
+                            else:
+                                filename = self.get_filename_from_link(link)
+                                logging.warning(f"Link {i}: No path in file data, extracted: {filename}")
+                            
+                            results.append((self.unrestrict_link(link), filename))
+                    else:
+                        # Different lengths - this might be the problem
+                        logging.warning(f"Mismatch: {len(links)} links vs {len(files)} files")
                         
-                        results.append((self.unrestrict_link(link), filename))
+                        # Try to extract filenames from the links themselves as a safer approach
+                        for i, link in enumerate(links):
+                            # For now, extract from link to avoid mismatching
+                            filename = self.get_filename_from_link(link)
+                            logging.info(f"Link {i}: Using extracted filename: {filename}")
+                            results.append((self.unrestrict_link(link), filename))
+                    
                     return results
             time.sleep(10)
     
     def get_filename_from_link(self, link):
         """Extract filename from Real Debrid link"""
+        filename = None
+        
+        try:
+            # First try to get filename from the link URL itself (before unrestricting)
+            # Real-Debrid links sometimes contain the original filename
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(link)
+            url_filename = parsed_url.path.split('/')[-1]
+            if url_filename and '.' in url_filename:
+                filename = urllib.parse.unquote(url_filename)
+                logging.info(f"Extracted filename from URL path: {filename}")
+                return self.basic_sanitize_filename(filename)
+        except Exception as e:
+            logging.warning(f"Failed to extract filename from URL path: {e}")
+        
         try:
             # Make a HEAD request to get filename from headers
             response = requests.head(link, timeout=10)
             cd_header = response.headers.get('content-disposition', '')
             if 'filename=' in cd_header:
                 filename = cd_header.split('filename=')[-1].strip('"').strip("'")
-                return self.sanitize_filename(filename)
-        except:
-            pass
+                logging.info(f"Extracted filename from headers: {filename}")
+                return self.basic_sanitize_filename(filename)
+        except Exception as e:
+            logging.warning(f"Failed to get filename from headers: {e}")
         
-        # Fallback to URL parsing
-        filename = link.split('/')[-1].split('?')[0]
-        return self.sanitize_filename(filename) if filename else 'download'
+        # Final fallback to URL parsing
+        try:
+            url_filename = link.split('/')[-1].split('?')[0]
+            if '%' in url_filename:
+                import urllib.parse
+                url_filename = urllib.parse.unquote(url_filename)
+            filename = url_filename if url_filename else 'download'
+            logging.info(f"Using fallback filename: {filename}")
+        except:
+            filename = 'download'
+            
+        return self.basic_sanitize_filename(filename)
     
     def basic_sanitize_filename(self, filename):
         """Basic filename sanitization - only remove dangerous characters and limit length, preserve extension"""
@@ -607,6 +735,25 @@ class MagnetHandler(FileSystemEventHandler):
             os.makedirs(self.completed_folder, exist_ok=True)
             final_path = os.path.join(self.completed_folder, filename)
             
+            # Check if file is a compressed archive and extract it before moving to completed folder
+            if self.auto_extract and self.is_archive_file(temp_path):
+                logging.info(f"Detected archive file, attempting extraction: {temp_path}")
+                extraction_success = self.extract_archive_to_completed(temp_path, self.completed_folder)
+                if extraction_success:
+                    logging.info(f"Archive extracted successfully to completed folder, removing original: {temp_path}")
+                    try:
+                        os.remove(temp_path)
+                        # Mark file as completed
+                        if file_index is not None and file_path and file_path in self.file_downloads:
+                            if file_index < len(self.file_downloads[file_path]):
+                                self.file_downloads[file_path][file_index]['progress'] = 100
+                                self.file_downloads[file_path][file_index]['status'] = 'Extracted'
+                        return  # Don't move the original file since we extracted it
+                    except Exception as e:
+                        logging.warning(f"Failed to remove original archive: {e}")
+                else:
+                    logging.warning(f"Archive extraction failed, moving original to completed folder: {temp_path}")
+            
             # Check if file already exists in completed folder
             if os.path.exists(final_path):
                 logging.info(f"File already exists in completed folder, removing from in_progress: {filename}")
@@ -618,6 +765,7 @@ class MagnetHandler(FileSystemEventHandler):
                 try:
                     os.rename(temp_path, final_path)
                     logging.info(f"Download completed successfully: {final_path}")
+                    
                     # Mark file as completed
                     if file_index is not None and file_path and file_path in self.file_downloads:
                         if file_index < len(self.file_downloads[file_path]):
@@ -651,6 +799,205 @@ class MagnetHandler(FileSystemEventHandler):
             logging.info(f"Torrent deleted successfully: {torrent_id}")
         else:
             logging.warning(f"Torrent deletion response: {response.status_code}")
+    
+    def is_archive_file(self, file_path):
+        """Check if file is a supported archive format"""
+        archive_extensions = {
+            '.zip', '.rar', '.7z', '.tar', '.tar.gz', '.tgz', 
+            '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.gz', '.bz2', '.xz'
+        }
+        
+        file_lower = file_path.lower()
+        return any(file_lower.endswith(ext) for ext in archive_extensions)
+    
+    def extract_archive(self, archive_path):
+        """Extract archive file to the same directory and return success status"""
+        extract_dir = os.path.dirname(archive_path)
+        return self._extract_archive_internal(archive_path, extract_dir)
+    
+    def extract_archive_to_completed(self, archive_path, completed_folder):
+        """Extract archive file directly to completed folder and return success status"""
+        return self._extract_archive_internal(archive_path, completed_folder)
+    
+    def _extract_archive_internal(self, archive_path, extract_dir):
+        """Internal method to extract archive file to specified directory"""
+        try:
+            import zipfile
+            import tarfile
+            import subprocess
+            
+            archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+            
+            # Handle different archive types
+            if archive_path.lower().endswith('.zip'):
+                return self._extract_zip(archive_path, extract_dir)
+            elif archive_path.lower().endswith('.rar'):
+                return self._extract_rar(archive_path, extract_dir)
+            elif archive_path.lower().endswith('.7z'):
+                return self._extract_7z(archive_path, extract_dir)
+            elif any(archive_path.lower().endswith(ext) for ext in ['.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz']):
+                return self._extract_tar(archive_path, extract_dir)
+            elif any(archive_path.lower().endswith(ext) for ext in ['.gz', '.bz2', '.xz']):
+                return self._extract_compressed(archive_path, extract_dir)
+            else:
+                logging.warning(f"Unsupported archive format: {archive_path}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error extracting archive {archive_path}: {e}")
+            return False
+    
+    def _extract_zip(self, archive_path, extract_dir):
+        """Extract ZIP file"""
+        try:
+            import zipfile
+            
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                # Extract directly to the specified directory
+                zip_ref.extractall(extract_dir)
+                
+            logging.info(f"ZIP extraction completed: {archive_path} -> {extract_dir}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"ZIP extraction failed: {e}")
+            return False
+    
+    def _extract_rar(self, archive_path, extract_dir):
+        """Extract RAR file using unrar command"""
+        try:
+            import subprocess
+            
+            # Try to use unrar command
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            # Try different unrar commands
+            unrar_commands = ['unrar', 'rar']
+            
+            for cmd in unrar_commands:
+                try:
+                    result = subprocess.run([cmd, 'x', '-y', archive_path, extract_dir], 
+                                          capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0:
+                        logging.info(f"RAR extraction completed: {archive_path} -> {extract_dir}")
+                        return True
+                    else:
+                        logging.warning(f"RAR extraction failed with {cmd}: {result.stderr}")
+                except FileNotFoundError:
+                    continue
+                except subprocess.TimeoutExpired:
+                    logging.error(f"RAR extraction timed out: {archive_path}")
+                    return False
+            
+            # If unrar is not available, try Python rarfile library
+            try:
+                import rarfile
+                with rarfile.RarFile(archive_path) as rf:
+                    rf.extractall(extract_dir)
+                logging.info(f"RAR extraction completed with rarfile: {archive_path} -> {extract_dir}")
+                return True
+            except ImportError:
+                logging.warning("RAR extraction failed: unrar command and rarfile library not available")
+                return False
+            except Exception as e:
+                logging.error(f"RAR extraction failed with rarfile: {e}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"RAR extraction failed: {e}")
+            return False
+    
+    def _extract_7z(self, archive_path, extract_dir):
+        """Extract 7z file using 7z command"""
+        try:
+            import subprocess
+            
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            # Try different 7z commands
+            sevenz_commands = ['7z', '7za', '7zr']
+            
+            for cmd in sevenz_commands:
+                try:
+                    result = subprocess.run([cmd, 'x', f'-o{extract_dir}', '-y', archive_path], 
+                                          capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0:
+                        logging.info(f"7z extraction completed: {archive_path} -> {extract_dir}")
+                        return True
+                    else:
+                        logging.warning(f"7z extraction failed with {cmd}: {result.stderr}")
+                except FileNotFoundError:
+                    continue
+                except subprocess.TimeoutExpired:
+                    logging.error(f"7z extraction timed out: {archive_path}")
+                    return False
+            
+            logging.warning("7z extraction failed: 7z command not available")
+            return False
+            
+        except Exception as e:
+            logging.error(f"7z extraction failed: {e}")
+            return False
+    
+    def _extract_tar(self, archive_path, extract_dir):
+        """Extract TAR file (including compressed variants)"""
+        try:
+            import tarfile
+            
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            # Determine compression mode
+            mode = 'r'
+            if archive_path.lower().endswith(('.tar.gz', '.tgz')):
+                mode = 'r:gz'
+            elif archive_path.lower().endswith(('.tar.bz2', '.tbz2')):
+                mode = 'r:bz2'
+            elif archive_path.lower().endswith(('.tar.xz', '.txz')):
+                mode = 'r:xz'
+            
+            with tarfile.open(archive_path, mode) as tar_ref:
+                tar_ref.extractall(extract_dir)
+                
+            logging.info(f"TAR extraction completed: {archive_path} -> {extract_dir}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"TAR extraction failed: {e}")
+            return False
+    
+    def _extract_compressed(self, archive_path, extract_dir):
+        """Extract single compressed files (gz, bz2, xz)"""
+        try:
+            import gzip
+            import bz2
+            import lzma
+            
+            # Determine output filename (remove compression extension)
+            base_name = os.path.basename(archive_path)
+            if base_name.lower().endswith('.gz'):
+                output_name = base_name[:-3]
+                opener = gzip.open
+            elif base_name.lower().endswith('.bz2'):
+                output_name = base_name[:-4]
+                opener = bz2.open
+            elif base_name.lower().endswith('.xz'):
+                output_name = base_name[:-3]
+                opener = lzma.open
+            else:
+                return False
+            
+            output_path = os.path.join(extract_dir, output_name)
+            
+            with opener(archive_path, 'rb') as compressed_file:
+                with open(output_path, 'wb') as output_file:
+                    output_file.write(compressed_file.read())
+            
+            logging.info(f"Compressed file extraction completed: {archive_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Compressed file extraction failed: {e}")
+            return False
     
     def report_failure_to_arr(self, magnet_filename, trigger_search=True):
         try:
@@ -732,23 +1079,15 @@ class MagnetHandler(FileSystemEventHandler):
         pass
     
     def move_queue_item(self, file_path, direction):
-        if file_path not in self.queued_files:
-            return False
-        idx = self.queued_files.index(file_path)
-        if direction == 'up' and idx > 0:
-            self.queued_files[idx], self.queued_files[idx-1] = self.queued_files[idx-1], self.queued_files[idx]
-            return True
-        elif direction == 'down' and idx < len(self.queued_files) - 1:
-            self.queued_files[idx], self.queued_files[idx+1] = self.queued_files[idx+1], self.queued_files[idx]
-            return True
+        # Queue movement no longer supported since uploads are unlimited
         return False
 
 def process_existing_magnets(magnets_folder, handler):
     """Process any existing magnet files in the folder"""
     try:
-        magnet_files = [f for f in os.listdir(magnets_folder) if f.endswith('.magnet')]
+        magnet_files = [f for f in os.listdir(magnets_folder) if f.endswith('.magnet') or f.endswith('.torrent')]
         if magnet_files:
-            logging.info(f"Found {len(magnet_files)} magnet files to process in {magnets_folder}")
+            logging.info(f"Found {len(magnet_files)} magnet/torrent files to process in {magnets_folder}")
         
         for filename in magnet_files:
             file_path = os.path.join(magnets_folder, filename)
@@ -808,11 +1147,12 @@ def setup_handlers(config_path, observer):
         os.makedirs(completed_downloads_folder, exist_ok=True)
         os.makedirs(failed_magnets_folder, exist_ok=True)
         
-        # Get performance mode - file_types parameter removed
+        # Get performance mode and auto extraction setting
         performance_mode = config.get('performance_mode', 'medium')
+        auto_extract = config.get('auto_extract_archives', True)
         
         # Create handler
-        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name)
+        handler = MagnetHandler(config_path, completed_downloads_folder, magnets_folder, completed_magnets_folder, in_progress_folder, failed_magnets_folder, performance_mode, client_name, None, auto_extract)
         handlers.append((client_name, handler, magnets_folder))
         
         # Schedule observer

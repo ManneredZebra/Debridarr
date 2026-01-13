@@ -436,7 +436,7 @@ class WebUI:
                     
                     magnets_folder = os.path.expandvars(client_config['magnets_folder'])
                     if os.path.exists(magnets_folder):
-                        counts[client_name]['magnets'] = len([f for f in os.listdir(magnets_folder) if os.path.isfile(os.path.join(magnets_folder, f))])
+                        counts[client_name]['magnets'] = len([f for f in os.listdir(magnets_folder) if os.path.isfile(os.path.join(magnets_folder, f)) and (f.endswith('.magnet') or f.endswith('.torrent'))])
                     
                     in_progress_folder = os.path.expandvars(client_config['in_progress_folder'])
                     if os.path.exists(in_progress_folder):
@@ -478,6 +478,10 @@ class WebUI:
                             'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
                             'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
                         }
+                
+                # Ensure auto_extract_archives has a default value
+                if 'auto_extract_archives' not in new_config:
+                    new_config['auto_extract_archives'] = True
                 
                 # Write updated config
                 with open(self.config_path, 'w') as f:
@@ -567,6 +571,48 @@ class WebUI:
                 return jsonify({'success': False, 'message': f'Connection error: {str(e)}'})
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)})
+        
+        @self.app.route('/api/manual-magnet', methods=['POST'])
+        def submit_manual_magnet():
+            try:
+                data = request.json
+                client_name = data.get('client_name', '')
+                magnet_link = data.get('magnet_link', '').strip()
+                
+                if not client_name or not magnet_link:
+                    return jsonify({'success': False, 'message': 'Client name and magnet link required'})
+                
+                if not magnet_link.startswith('magnet:'):
+                    return jsonify({'success': False, 'message': 'Invalid magnet link format'})
+                
+                # Find the handler for this client
+                handler = None
+                magnets_folder = None
+                for name, h, folder in self.handlers:
+                    if name == client_name:
+                        handler = h
+                        magnets_folder = folder
+                        break
+                
+                if not handler:
+                    return jsonify({'success': False, 'message': f'Client "{client_name}" not found'})
+                
+                # Generate a unique filename for the magnet
+                import hashlib
+                import time
+                magnet_hash = hashlib.md5(magnet_link.encode()).hexdigest()[:8]
+                timestamp = int(time.time())
+                filename = f"manual_{client_name}_{timestamp}_{magnet_hash}.magnet"
+                
+                # Write magnet file to the client's magnets folder
+                magnet_file_path = os.path.join(magnets_folder, filename)
+                with open(magnet_file_path, 'w') as f:
+                    f.write(magnet_link)
+                
+                return jsonify({'success': True, 'message': f'Magnet submitted successfully to {client_name}'})
+                
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)})
     
     def run(self):
         import logging
@@ -654,7 +700,12 @@ HTML_TEMPLATE = '''
         </div>
         <div class="content">
             <div id="overview" class="section active">
-                <h1>System Overview</h1>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h1 style="margin: 0;">System Overview</h1>
+                    <button onclick="resetClientOrder()" style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                        Reset Order
+                    </button>
+                </div>
                 <div id="system-warnings"></div>
                 <div id="status-cards"></div>
             </div>
@@ -793,6 +844,10 @@ HTML_TEMPLATE = '''
             ])
                 .then(([data, counts]) => {
                     console.log('Status data:', data);
+                    
+                    // Store data for use in moveClient function
+                    window.lastStatusData = data;
+                    
                     const statusCards = document.getElementById('status-cards');
                     const downloadList = document.getElementById('download-list');
                     
@@ -802,7 +857,27 @@ HTML_TEMPLATE = '''
                     // Count total active downloads
                     let totalDownloads = 0;
                     
-                    Object.entries(data).forEach(([client, status]) => {
+                    // Get client order from config or use default alphabetical order
+                    const clientOrder = window.clientOrder || [];
+                    
+                    // Ensure all clients are in the order array (in case new clients were added)
+                    const allClients = Object.keys(data);
+                    const orderedClients = [...clientOrder.filter(c => allClients.includes(c))];
+                    allClients.forEach(client => {
+                        if (!orderedClients.includes(client)) {
+                            orderedClients.push(client);
+                        }
+                    });
+                    
+                    console.log('Client ordering:', {
+                        allClients,
+                        savedOrder: clientOrder,
+                        finalOrder: orderedClients
+                    });
+                    
+                    orderedClients.forEach((client, index) => {
+                        const status = data[client];
+                        if (!status) return;
                         totalDownloads += status.active_downloads;
                         
                         // Status card
@@ -812,7 +887,10 @@ HTML_TEMPLATE = '''
                         const clientCounts = counts[client] || {magnets: 0, in_progress: 0, completed_downloads: 0};
                         
                         card.innerHTML = `
-                            <h3 style="margin-bottom: 15px;">${client.toUpperCase()}</h3>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <h3 style="margin: 0;">${client.toUpperCase()}</h3>
+                                <div style="color: #666; font-size: 12px;">Position ${index + 1}</div>
+                            </div>
                             <div style="display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap;">
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
                                     <div style="font-size: 24px; font-weight: bold; color: #28a745;">${status.uploading_count || 0}</div>
@@ -839,7 +917,47 @@ HTML_TEMPLATE = '''
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Failed</div>
                                 </div>
                             </div>
+                            <div style="margin: 15px 0; padding: 15px; background: #1a1a1a; border-radius: 5px;">
+                                <h4 style="margin: 0 0 10px 0; color: #fff; font-size: 14px;">Manual Magnet Submission</h4>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <input type="text" id="magnet-input-${client}" placeholder="Paste magnet link here..." 
+                                           style="flex: 1; padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 3px; color: #fff; font-size: 14px;">
+                                    <button onclick="submitManualMagnet('${client}')" 
+                                            style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                                        Submit
+                                    </button>
+                                </div>
+                                <div style="font-size: 11px; color: #999; margin-top: 5px;">
+                                    Drop .torrent files in the magnets folder or paste magnet links above
+                                </div>
+                            </div>
                         `;
+                        
+                        // Add reorder buttons container
+                        const reorderContainer = document.createElement('div');
+                        reorderContainer.style.cssText = 'display: flex; gap: 5px; margin: 10px 0; justify-content: flex-end;';
+                        
+                        // Up button
+                        if (index > 0) {
+                            const upBtn = document.createElement('button');
+                            upBtn.className = 'retry-btn';
+                            upBtn.textContent = '↑ Move Up';
+                            upBtn.style.cssText = 'background: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;';
+                            upBtn.onclick = function() { moveClient(client, 'up'); };
+                            reorderContainer.appendChild(upBtn);
+                        }
+                        
+                        // Down button
+                        if (index < orderedClients.length - 1) {
+                            const downBtn = document.createElement('button');
+                            downBtn.className = 'retry-btn';
+                            downBtn.textContent = '↓ Move Down';
+                            downBtn.style.cssText = 'background: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;';
+                            downBtn.onclick = function() { moveClient(client, 'down'); };
+                            reorderContainer.appendChild(downBtn);
+                        }
+                        
+                        card.appendChild(reorderContainer);
                         
                         if (status.active_downloads > 0) {
                             const viewBtn = document.createElement('button');
@@ -858,8 +976,18 @@ HTML_TEMPLATE = '''
                         
                         statusCards.appendChild(card);
                         
+                        // Sort downloads: downloading first, then by oldest first (assuming filename contains timestamp or order)
+                        const sortedDownloads = [...status.downloads].sort((a, b) => {
+                            // First priority: downloading phase comes before uploading
+                            if (a.phase === 'Downloading' && b.phase !== 'Downloading') return -1;
+                            if (b.phase === 'Downloading' && a.phase !== 'Downloading') return 1;
+                            
+                            // Second priority: sort by filename (oldest first - assuming timestamp in filename)
+                            return a.filename.localeCompare(b.filename);
+                        });
+                        
                         // Download items
-                        status.downloads.forEach(download => {
+                        sortedDownloads.forEach(download => {
                             const item = document.createElement('div');
                             item.className = 'download-item';
                             
@@ -980,6 +1108,104 @@ HTML_TEMPLATE = '''
                         loadStatus();
                     });
             }
+        }
+
+        function submitManualMagnet(client) {
+            const input = document.getElementById(`magnet-input-${client}`);
+            const magnetLink = input.value.trim();
+            
+            if (!magnetLink) {
+                alert('Please enter a magnet link');
+                return;
+            }
+            
+            if (!magnetLink.startsWith('magnet:')) {
+                alert('Invalid magnet link format');
+                return;
+            }
+            
+            fetch('/api/manual-magnet', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_name: client,
+                    magnet_link: magnetLink
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message);
+                    input.value = ''; // Clear the input
+                    loadStatus(); // Refresh the status
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(err => {
+                console.error('Manual magnet submission error:', err);
+                alert('Error submitting magnet link');
+            });
+        }
+
+        // Client order management
+        window.clientOrder = JSON.parse(localStorage.getItem('clientOrder')) || [];
+        
+        function moveClient(clientName, direction) {
+            console.log('moveClient called:', clientName, direction);
+            
+            // Get the current display order (not just the saved order)
+            const allClients = Object.keys(window.lastStatusData || {});
+            const currentOrder = window.clientOrder || [];
+            
+            console.log('Current state:', {
+                allClients,
+                savedOrder: currentOrder
+            });
+            
+            // Build the complete ordered list (same logic as in loadStatus)
+            const orderedClients = [...currentOrder.filter(c => allClients.includes(c))];
+            allClients.forEach(client => {
+                if (!orderedClients.includes(client)) {
+                    orderedClients.push(client);
+                }
+            });
+            
+            console.log('Ordered clients before move:', orderedClients);
+            
+            const currentIndex = orderedClients.indexOf(clientName);
+            if (currentIndex === -1) {
+                console.error('Client not found in ordered list:', clientName);
+                return;
+            }
+            
+            const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+            
+            console.log('Move from index', currentIndex, 'to', newIndex);
+            
+            if (newIndex >= 0 && newIndex < orderedClients.length) {
+                // Swap positions in the complete ordered list
+                [orderedClients[currentIndex], orderedClients[newIndex]] = [orderedClients[newIndex], orderedClients[currentIndex]];
+                
+                console.log('New order:', orderedClients);
+                
+                // Save the new complete order
+                window.clientOrder = orderedClients;
+                localStorage.setItem('clientOrder', JSON.stringify(orderedClients));
+                
+                // Refresh display
+                loadStatus();
+            } else {
+                console.log('Cannot move - index out of bounds');
+            }
+        }
+        
+        function resetClientOrder() {
+            window.clientOrder = [];
+            localStorage.removeItem('clientOrder');
+            loadStatus();
         }
 
         let currentHistoryPage = 1;
@@ -1249,6 +1475,18 @@ HTML_TEMPLATE = '''
                                 Higher modes download faster but may affect your computer's performance during active downloads.
                             </div>
                         </div>
+                        
+                        <div class="form-row">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="auto-extract" ${config.auto_extract_archives !== false ? 'checked' : ''} 
+                                       style="margin-right: 8px; transform: scale(1.2);">
+                                Automatically extract compressed archives
+                            </label>
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">
+                                When enabled, downloaded ZIP, RAR, 7Z, and TAR files will be automatically extracted and the original archive will be removed. 
+                                Supports: .zip, .rar, .7z, .tar, .tar.gz, .tar.bz2, .tar.xz, .gz, .bz2, .xz
+                            </div>
+                        </div>
                     `;
                     settingsContent.appendChild(perfGroup);
                     
@@ -1330,6 +1568,7 @@ HTML_TEMPLATE = '''
                 media_root_directory: document.getElementById('media-root-directory').value,
                 debrid_sync_limit: parseInt(document.getElementById('debrid-sync-limit').value) || 100,
                 performance_mode: document.getElementById('performance-mode').value,
+                auto_extract_archives: document.getElementById('auto-extract').checked,
                 download_clients: {}
             };
             
@@ -1636,8 +1875,8 @@ HTML_TEMPLATE = '''
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();
         
-        // Auto-refresh status every 5 seconds
-        setInterval(loadStatus, 5000);
+        // Auto-refresh status every 2 seconds for better progress bar updates
+        setInterval(loadStatus, 2000);
         // Health check every 10 minutes
         healthCheckInterval = setInterval(loadHealth, 600000);
         // Initial loads with retry for server startup
