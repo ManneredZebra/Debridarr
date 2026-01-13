@@ -147,8 +147,7 @@ class MagnetHandler(FileSystemEventHandler):
             if not torrent_id:
                 return None
             if torrent_id == 'FAILED':
-                # Report failure and move magnet to failed folder (magnet-specific error, trigger search)
-                self.report_failure_to_arr(filename, trigger_search=True)
+                # Move magnet to failed folder
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -163,8 +162,7 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_progress[file_path] = {'status': 'Selecting files', 'progress': 20, 'cache_progress': 10, 'download_progress': 0}
             if not self.select_files(torrent_id):
                 self.delete_torrent(torrent_id)
-                # Report failure (magnet-specific error, trigger search)
-                self.report_failure_to_arr(filename, trigger_search=True)
+                # Move magnet to failed folder
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -176,9 +174,8 @@ class MagnetHandler(FileSystemEventHandler):
             self.download_progress[file_path] = {'status': 'Caching to Real-Debrid', 'progress': 30, 'cache_progress': 15, 'download_progress': 0}
             results = self.wait_for_torrent(torrent_id, file_path)
             if results == 'DEAD':
-                # Dead magnet (0% for 10 minutes) - delete from RD, report failure with search
+                # Dead magnet (0% for 10 minutes) - delete from RD
                 self.delete_torrent(torrent_id)
-                self.report_failure_to_arr(filename, trigger_search=True)
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -188,8 +185,7 @@ class MagnetHandler(FileSystemEventHandler):
                 return None
             if not results:
                 self.delete_torrent(torrent_id)
-                # Report failure (network error or other issue, don't trigger search)
-                self.report_failure_to_arr(filename, trigger_search=False)
+                # Move magnet to failed folder
                 try:
                     os.makedirs(self.failed_magnets_folder, exist_ok=True)
                     os.rename(file_path, os.path.join(self.failed_magnets_folder, filename))
@@ -1095,81 +1091,6 @@ class MagnetHandler(FileSystemEventHandler):
         except Exception as e:
             logging.error(f"Compressed file extraction failed: {e}")
             return False
-    
-    def report_failure_to_arr(self, magnet_filename, trigger_search=True):
-        try:
-            with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            
-            client_config = config.get('download_clients', {}).get(self.client_name, {})
-            arr_url = client_config.get('arr_url', '')
-            arr_api_key = client_config.get('arr_api_key', '')
-            
-            if not arr_url or not arr_api_key:
-                return
-            
-            # Extract download ID from filename (format varies but usually contains ID)
-            import re
-            id_match = re.search(r'[_-]([0-9]+)[_\.]', magnet_filename)
-            if not id_match:
-                logging.debug(f"Could not extract download ID from: {magnet_filename}")
-                return
-            
-            download_id = id_match.group(1)
-            
-            # Try to find and remove from queue
-            headers = {'X-Api-Key': arr_api_key}
-            queue_url = f"{arr_url.rstrip('/')}/api/v3/queue"
-            
-            response = requests.get(queue_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                queue_items = response.json().get('records', [])
-                for item in queue_items:
-                    if str(item.get('id')) == download_id or download_id in item.get('title', ''):
-                        # Get the media ID for triggering search
-                        media_id = item.get('movieId') or item.get('seriesId') or item.get('episodeId')
-                        
-                        delete_url = f"{queue_url}/{item['id']}?blocklist=true&removeFromClient=true"
-                        del_response = requests.delete(delete_url, headers=headers, timeout=10)
-                        if del_response.status_code in [200, 204]:
-                            logging.info(f"Reported failure to {self.client_name}: {magnet_filename}")
-                            
-                            # Trigger automatic search if requested and media ID found
-                            if trigger_search and media_id:
-                                self._trigger_arr_search(arr_url, arr_api_key, media_id, item)
-                        else:
-                            logging.warning(f"Failed to report to {self.client_name}: {del_response.status_code}")
-                        return
-        except Exception as e:
-            logging.debug(f"Error reporting failure to {self.client_name}: {e}")
-    
-    def _trigger_arr_search(self, arr_url, arr_api_key, media_id, queue_item):
-        try:
-            headers = {'X-Api-Key': arr_api_key}
-            
-            # Determine if it's a movie or series/episode
-            if queue_item.get('movieId'):
-                # Radarr movie search
-                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
-                payload = {'name': 'MoviesSearch', 'movieIds': [media_id]}
-            elif queue_item.get('seriesId'):
-                # Sonarr series search
-                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
-                payload = {'name': 'SeriesSearch', 'seriesId': media_id}
-            elif queue_item.get('episodeId'):
-                # Sonarr episode search
-                search_url = f"{arr_url.rstrip('/')}/api/v3/command"
-                payload = {'name': 'EpisodeSearch', 'episodeIds': [media_id]}
-            else:
-                return
-            
-            response = requests.post(search_url, headers=headers, json=payload, timeout=10)
-            if response.status_code in [200, 201]:
-                logging.info(f"Triggered automatic search in {self.client_name} for media ID {media_id}")
-            else:
-                logging.warning(f"Failed to trigger search in {self.client_name}: {response.status_code}")
-        except Exception as e:
-            logging.debug(f"Error triggering search in {self.client_name}: {e}")
     
     def _process_next_queued(self):
         # No longer needed since we don't queue uploads, only downloads are limited

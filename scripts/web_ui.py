@@ -546,32 +546,7 @@ class WebUI:
             # Queue movement no longer supported since uploads are unlimited
             return jsonify({'success': False, 'message': 'Queue movement not supported - uploads are no longer queued'})
         
-        @self.app.route('/api/test-arr', methods=['POST'])
-        def test_arr_connection():
-            try:
-                data = request.json
-                arr_url = data.get('url', '').rstrip('/')
-                arr_api_key = data.get('api_key', '')
-                
-                if not arr_url or not arr_api_key:
-                    return jsonify({'success': False, 'message': 'URL and API key required'})
-                
-                headers = {'X-Api-Key': arr_api_key}
-                response = requests.get(f'{arr_url}/api/v3/system/status', headers=headers, timeout=10)
-                
-                if response.status_code == 200:
-                    app_name = response.json().get('appName', 'Unknown')
-                    version = response.json().get('version', 'Unknown')
-                    return jsonify({'success': True, 'message': f'Connected to {app_name} v{version}'})
-                elif response.status_code == 401:
-                    return jsonify({'success': False, 'message': 'Invalid API key'})
-                else:
-                    return jsonify({'success': False, 'message': f'Connection failed: {response.status_code}'})
-            except requests.RequestException as e:
-                return jsonify({'success': False, 'message': f'Connection error: {str(e)}'})
-            except Exception as e:
-                return jsonify({'success': False, 'message': str(e)})
-        
+
         @self.app.route('/api/manual-magnet', methods=['POST'])
         def submit_manual_magnet():
             try:
@@ -1652,15 +1627,6 @@ HTML_TEMPLATE = '''
                                 <label>Failed Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${clientConfig.failed_magnets_folder || ''}">
                             </div>
-                            <div class="form-row">
-                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
-                                <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="${clientConfig.arr_url || ''}" placeholder="http://localhost:8989 or http://localhost:7878">
-                            </div>
-                            <div class="form-row">
-                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
-                                <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="${clientConfig.arr_api_key || ''}" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
-                                <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
-                            </div>
                         `;
                         clientsDiv.appendChild(clientDiv);
                     });
@@ -1760,15 +1726,6 @@ HTML_TEMPLATE = '''
                             <label>Failed Magnets Folder:</label>
                             <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${baseDir}/failed_magnets">
                         </div>
-                        <div class="form-row">
-                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
-                            <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="" placeholder="http://localhost:8989 or http://localhost:7878">
-                        </div>
-                        <div class="form-row">
-                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
-                            <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
-                            <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
-                        </div>
                     `;
                     clientsDiv.appendChild(clientDiv);
                 });
@@ -1792,30 +1749,7 @@ HTML_TEMPLATE = '''
                 .catch(err => console.error('moveQueue error:', err));
         }
         
-        function testArrConnection(clientName) {
-            const url = document.getElementById(`arr-url-${clientName}`).value;
-            const apiKey = document.getElementById(`arr-key-${clientName}`).value;
-            
-            if (!url || !apiKey) {
-                alert('Please enter both URL and API key');
-                return;
-            }
-            
-            fetch('/api/test-arr', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({url: url, api_key: apiKey})
-            })
-                .then(r => r.json())
-                .then(data => {
-                    alert(data.message);
-                })
-                .catch(err => {
-                    console.error('Test connection error:', err);
-                    alert('Test failed: ' + err);
-                });
-        }
-
+        
         function syncDebridDownloads() {
             if (!confirm('Sync Real-Debrid download history? This will fetch all downloads from your Real-Debrid account.')) return;
             
