@@ -691,6 +691,7 @@ HTML_TEMPLATE = '''
             </div>
             <div class="nav-item active" onclick="showSection('overview')">Overview</div>
             <div class="nav-item" onclick="showSection('downloads')">Active Downloads</div>
+            <div class="nav-item" onclick="showSection('manual-upload')">Manual Upload</div>
             <div class="nav-item" onclick="showSection('history')">History</div>
             <div class="nav-item" onclick="showSection('failed')">Failed Downloads</div>
             <div class="nav-item" onclick="showSection('debrid-downloads')">Debrid Downloads</div>
@@ -712,6 +713,13 @@ HTML_TEMPLATE = '''
             <div id="downloads" class="section">
                 <h1>Active Downloads <span id="download-badge" style="background: #007acc; padding: 3px 10px; border-radius: 12px; font-size: 14px; margin-left: 10px;">0</span></h1>
                 <div id="download-list"></div>
+            </div>
+            <div id="manual-upload" class="section">
+                <h1>Manual Upload</h1>
+                <div style="margin-bottom: 20px; color: #ccc;">
+                    Submit magnet links directly to your download clients. This page doesn't auto-refresh, so your text won't disappear.
+                </div>
+                <div id="manual-upload-clients"></div>
             </div>
             <div id="history" class="section">
                 <h1>Download History</h1>
@@ -800,6 +808,7 @@ HTML_TEMPLATE = '''
             if (section === 'debrid-downloads') loadDebridDownloads();
             if (section === 'completed') loadCompleted();
             if (section === 'settings') loadSettings();
+            if (section === 'manual-upload') loadManualUpload();
         }
 
         let healthCheckInterval = null;
@@ -915,20 +924,6 @@ HTML_TEMPLATE = '''
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
                                     <div style="font-size: 24px; font-weight: bold; color: #dc3545;">${clientCounts.failed_magnets || 0}</div>
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Failed</div>
-                                </div>
-                            </div>
-                            <div style="margin: 15px 0; padding: 15px; background: #1a1a1a; border-radius: 5px;">
-                                <h4 style="margin: 0 0 10px 0; color: #fff; font-size: 14px;">Manual Magnet Submission</h4>
-                                <div style="display: flex; gap: 10px; align-items: center;">
-                                    <input type="text" id="magnet-input-${client}" placeholder="Paste magnet link here..." 
-                                           style="flex: 1; padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 3px; color: #fff; font-size: 14px;">
-                                    <button onclick="submitManualMagnet('${client}')" 
-                                            style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
-                                        Submit
-                                    </button>
-                                </div>
-                                <div style="font-size: 11px; color: #999; margin-top: 5px;">
-                                    Drop .torrent files in the magnets folder or paste magnet links above
                                 </div>
                             </div>
                         `;
@@ -1139,6 +1134,7 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     alert(data.message);
                     input.value = ''; // Clear the input
+                    delete window.magnetInputValues[client]; // Clear preserved value
                     loadStatus(); // Refresh the status
                 } else {
                     alert('Error: ' + data.message);
@@ -1415,6 +1411,134 @@ HTML_TEMPLATE = '''
                         alert('Cleanup failed: ' + err);
                     });
             }
+        }
+
+        function loadManualUpload() {
+            fetch('/api/config')
+                .then(r => r.json())
+                .then(config => {
+                    const manualUploadClients = document.getElementById('manual-upload-clients');
+                    manualUploadClients.innerHTML = '';
+                    
+                    const clients = config.download_clients || {};
+                    
+                    if (Object.keys(clients).length === 0) {
+                        manualUploadClients.innerHTML = '<div class="download-item">No download clients configured. Please configure clients in the Settings tab first.</div>';
+                        return;
+                    }
+                    
+                    // Get client order from localStorage (same as overview tab)
+                    const clientOrder = window.clientOrder || [];
+                    const allClients = Object.keys(clients);
+                    
+                    // Build ordered list (same logic as overview tab)
+                    const orderedClients = [...clientOrder.filter(c => allClients.includes(c))];
+                    allClients.forEach(client => {
+                        if (!orderedClients.includes(client)) {
+                            orderedClients.push(client);
+                        }
+                    });
+                    
+                    // Create upload sections in the same order as overview tab
+                    orderedClients.forEach(client => {
+                        const clientDiv = document.createElement('div');
+                        clientDiv.className = 'download-item';
+                        clientDiv.style.marginBottom = '20px';
+                        
+                        clientDiv.innerHTML = `
+                            <h3 style="margin: 0 0 15px 0; color: #fff;">${client.toUpperCase()}</h3>
+                            <div style="margin-bottom: 10px;">
+                                <label style="display: block; margin-bottom: 5px; color: #ccc; font-size: 14px;">Magnet Link:</label>
+                                <textarea id="manual-magnet-${client}" placeholder="Paste your magnet link here..." 
+                                         style="width: 100%; height: 80px; padding: 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; font-size: 14px; resize: vertical; box-sizing: border-box;"></textarea>
+                            </div>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <button onclick="submitManualMagnetFromTab('${client}')" 
+                                        style="background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                                    Submit Magnet
+                                </button>
+                                <button onclick="clearManualMagnet('${client}')" 
+                                        style="background: #6c757d; color: white; border: none; padding: 10px 20px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                                    Clear
+                                </button>
+                                <div id="manual-status-${client}" style="color: #28a745; font-size: 14px; margin-left: 10px;"></div>
+                            </div>
+                            <div style="font-size: 12px; color: #999; margin-top: 10px;">
+                                You can also drop .torrent files directly into the magnets folder: <br>
+                                <code style="background: #333; padding: 2px 4px; border-radius: 2px;">${clients[client].magnets_folder}</code>
+                            </div>
+                        `;
+                        
+                        manualUploadClients.appendChild(clientDiv);
+                    });
+                })
+                .catch(err => {
+                    console.error('loadManualUpload error:', err);
+                    document.getElementById('manual-upload-clients').innerHTML = '<div class="download-item">Error loading manual upload interface</div>';
+                });
+        }
+
+        function submitManualMagnetFromTab(client) {
+            const textarea = document.getElementById(`manual-magnet-${client}`);
+            const statusDiv = document.getElementById(`manual-status-${client}`);
+            const magnetLink = textarea.value.trim();
+            
+            // Clear previous status
+            statusDiv.textContent = '';
+            
+            if (!magnetLink) {
+                statusDiv.textContent = 'Please enter a magnet link';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+            
+            if (!magnetLink.startsWith('magnet:')) {
+                statusDiv.textContent = 'Invalid magnet link format';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+            
+            statusDiv.textContent = 'Submitting...';
+            statusDiv.style.color = '#ffc107';
+            
+            fetch('/api/manual-magnet', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_name: client,
+                    magnet_link: magnetLink
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    statusDiv.textContent = 'Magnet submitted successfully!';
+                    statusDiv.style.color = '#28a745';
+                    textarea.value = ''; // Clear the textarea
+                    
+                    // Clear status after 3 seconds
+                    setTimeout(() => {
+                        statusDiv.textContent = '';
+                    }, 3000);
+                } else {
+                    statusDiv.textContent = 'Error: ' + data.message;
+                    statusDiv.style.color = '#dc3545';
+                }
+            })
+            .catch(err => {
+                console.error('Manual magnet submission error:', err);
+                statusDiv.textContent = 'Error submitting magnet link';
+                statusDiv.style.color = '#dc3545';
+            });
+        }
+
+        function clearManualMagnet(client) {
+            const textarea = document.getElementById(`manual-magnet-${client}`);
+            const statusDiv = document.getElementById(`manual-status-${client}`);
+            textarea.value = '';
+            statusDiv.textContent = '';
         }
 
         function loadSettings() {
@@ -1864,7 +1988,7 @@ HTML_TEMPLATE = '''
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         document.getElementById(savedTab).classList.add('active');
         const navItems = document.querySelectorAll('.nav-item');
-        const sections = ['overview', 'downloads', 'history', 'failed', 'debrid-downloads', 'completed', 'logs', 'settings'];
+        const sections = ['overview', 'downloads', 'manual-upload', 'history', 'failed', 'debrid-downloads', 'completed', 'logs', 'settings'];
         const index = sections.indexOf(savedTab);
         if (index >= 0) navItems[index].classList.add('active');
         
@@ -1874,9 +1998,38 @@ HTML_TEMPLATE = '''
         if (savedTab === 'debrid-downloads') loadDebridDownloads();
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();
+        if (savedTab === 'manual-upload') loadManualUpload();
+        
+        // Global variable to preserve input values
+        window.magnetInputValues = {};
+        
+        // Function to preserve input values
+        function preserveMagnetInputs() {
+            const inputs = document.querySelectorAll('[id^="magnet-input-"]');
+            inputs.forEach(input => {
+                const client = input.id.replace('magnet-input-', '');
+                if (input.value.trim()) {
+                    window.magnetInputValues[client] = input.value;
+                }
+            });
+        }
+        
+        // Function to restore input values
+        function restoreMagnetInputs() {
+            Object.keys(window.magnetInputValues).forEach(client => {
+                const input = document.getElementById(`magnet-input-${client}`);
+                if (input && window.magnetInputValues[client]) {
+                    input.value = window.magnetInputValues[client];
+                }
+            });
+        }
         
         // Auto-refresh status every 2 seconds for better progress bar updates
-        setInterval(loadStatus, 2000);
+        setInterval(() => {
+            preserveMagnetInputs();
+            loadStatus();
+            setTimeout(restoreMagnetInputs, 100); // Small delay to ensure DOM is updated
+        }, 2000);
         // Health check every 10 minutes
         healthCheckInterval = setInterval(loadHealth, 600000);
         // Initial loads with retry for server startup
