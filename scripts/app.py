@@ -43,6 +43,7 @@ class MagnetHandler(FileSystemEventHandler):
         self.retry_attempts = {}  # Track retry attempts for failed magnets
         self.retry_cooldown = {}  # Track cooldown timestamps for retries
         self.torrent_ids = {}  # Track torrent IDs for each magnet file
+        self.progress_lock = threading.Lock()  # Lock for thread-safe progress updates
     
     def reload_file_types(self):
         """Reload configuration - kept for compatibility but no longer filters by file type"""
@@ -226,21 +227,70 @@ class MagnetHandler(FileSystemEventHandler):
             total_files = len(self.file_downloads[file_path])
             self.download_progress[file_path] = {'status': f'Downloading files ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
             
-            # Download all files from the torrent
+            # Download all files from the torrent (parallel downloads)
             hoster_unavailable = False
-            for i, (download_link, filename) in enumerate(results):
-                # Check if download was aborted
-                if file_path not in self.processing_files:
-                    logging.info(f"Download aborted, stopping file downloads: {file_path}")
-                    torrent_id = self.torrent_ids.get(file_path)
-                    if torrent_id:
-                        self.delete_torrent(torrent_id)
-                    break
+            
+            # Check for hoster unavailable first
+            for download_link, filename in results:
                 if download_link == 'HOSTER_UNAVAILABLE':
                     hoster_unavailable = True
                     break
-                if download_link and filename:
-                    self.download_file(download_link, filename, file_path, i)
+            
+            if not hoster_unavailable:
+                # Create a separate executor for file downloads within this torrent
+                # Use the same max_workers as the main executor to respect performance mode
+                total_files = len([r for r in results if r[0] and r[1]])
+                concurrent_downloads = min(self.max_workers, total_files)
+                logging.info(f"Starting parallel download of {total_files} files with {concurrent_downloads} concurrent downloads")
+                
+                with ThreadPoolExecutor(max_workers=concurrent_downloads) as file_executor:
+                    # Submit all file downloads as futures
+                    download_futures = []
+                    for i, (download_link, filename) in enumerate(results):
+                        if download_link and filename:
+                            future = file_executor.submit(self.download_file, download_link, filename, file_path, i)
+                            download_futures.append(future)
+                    
+                    # Wait for all downloads to complete or check for abort
+                    completed_count = 0
+                    while completed_count < len(download_futures):
+                        # Check if download was aborted
+                        if file_path not in self.processing_files:
+                            logging.info(f"Download aborted, cancelling remaining file downloads: {file_path}")
+                            # Cancel remaining futures
+                            for future in download_futures:
+                                future.cancel()
+                            torrent_id = self.torrent_ids.get(file_path)
+                            if torrent_id:
+                                self.delete_torrent(torrent_id)
+                            return
+                        
+                        # Count completed downloads
+                        completed_count = sum(1 for future in download_futures if future.done())
+                        
+                        # Update overall progress based on completed files (thread-safe)
+                        with self.progress_lock:
+                            if file_path in self.file_downloads:
+                                total_files = len(self.file_downloads[file_path])
+                                files_progress = (completed_count / total_files * 100) if total_files > 0 else 0
+                                self.download_progress[file_path] = {
+                                    'status': f'Downloading files ({completed_count}/{total_files} complete)', 
+                                    'progress': 50 + int(files_progress * 0.5), 
+                                    'cache_progress': 100, 
+                                    'files_progress': int(files_progress)
+                                }
+                        
+                        time.sleep(1)  # Check every second
+                    
+                    # Wait for all futures to complete and handle any exceptions
+                    for future in download_futures:
+                        try:
+                            future.result()  # This will raise any exception that occurred
+                        except Exception as e:
+                            logging.error(f"File download failed: {e}")
+                            # Continue with other downloads
+                    
+                    logging.info(f"Completed parallel download of {len(download_futures)} files")
             
             # Handle hoster unavailable
             if hoster_unavailable:
@@ -525,31 +575,92 @@ class MagnetHandler(FileSystemEventHandler):
                     results = []
                     
                     logging.info(f"Processing {len(links)} links and {len(files)} files from torrent")
+                    logging.debug(f"Raw torrent files data: {files}")
                     
                     # Try different approaches to match links with filenames
                     if len(links) == len(files):
                         # If same length, try index matching but with validation
                         logging.info("Same number of links and files, using index matching")
                         for i, link in enumerate(links):
-                            if files[i].get('path'):
-                                filename = files[i]['path'].split('/')[-1]
-                                file_size = files[i].get('bytes', 0)
-                                logging.info(f"Link {i}: {filename} ({file_size} bytes)")
-                            else:
-                                filename = self.get_filename_from_link(link)
-                                logging.warning(f"Link {i}: No path in file data, extracted: {filename}")
+                            unrestricted_url = None
                             
-                            results.append((self.unrestrict_link(link), filename))
+                            if files[i].get('path'):
+                                # Handle nested folder structures in torrent files
+                                full_path = files[i]['path']
+                                filename = full_path.split('/')[-1]  # Get just the filename, not the full path
+                                file_size = files[i].get('bytes', 0)
+                                logging.info(f"Link {i}: Full path: {full_path}, Filename: {filename} ({file_size} bytes)")
+                                
+                                # Validate that the filename has an extension and isn't just the torrent name
+                                if '.' not in filename or filename.endswith('.torrent'):
+                                    logging.warning(f"Filename lacks proper extension or is torrent name: {filename}")
+                                    # Try to get filename from unrestricted URL
+                                    unrestricted_url = self.unrestrict_link(link)
+                                    if unrestricted_url:
+                                        fallback_filename = self.extract_filename_from_url(unrestricted_url)
+                                        if '.' in fallback_filename and not fallback_filename.endswith('.torrent'):
+                                            filename = fallback_filename
+                                            logging.info(f"Using filename from unrestricted URL: {filename}")
+                                        else:
+                                            # If we still don't have a good filename, try to construct one
+                                            base_name = filename.replace('.torrent', '') if filename.endswith('.torrent') else filename
+                                            filename = f"{base_name}.mkv"  # Default to video file
+                                            logging.info(f"Using constructed filename: {filename}")
+                                    else:
+                                        # If unrestrict failed, construct a filename
+                                        base_name = filename.replace('.torrent', '') if filename.endswith('.torrent') else filename
+                                        filename = f"{base_name}.mkv"  # Default to video file
+                                        logging.info(f"Using constructed filename (unrestrict failed): {filename}")
+                            else:
+                                # Try to get filename from unrestricted URL
+                                unrestricted_url = self.unrestrict_link(link)
+                                if unrestricted_url:
+                                    filename = self.extract_filename_from_url(unrestricted_url)
+                                    logging.info(f"Link {i}: Extracted from unrestricted URL: {filename}")
+                                else:
+                                    filename = 'download.mkv'
+                                    logging.warning(f"Link {i}: Could not unrestrict link, using default: {filename}")
+                            
+                            # If we didn't unrestrict yet, do it now
+                            if not unrestricted_url:
+                                unrestricted_url = self.unrestrict_link(link)
+                            
+                            results.append((unrestricted_url or link, filename))
                     else:
                         # Different lengths - this might be the problem
                         logging.warning(f"Mismatch: {len(links)} links vs {len(files)} files")
                         
                         # Try to extract filenames from the links themselves as a safer approach
                         for i, link in enumerate(links):
-                            # For now, extract from link to avoid mismatching
-                            filename = self.get_filename_from_link(link)
-                            logging.info(f"Link {i}: Using extracted filename: {filename}")
-                            results.append((self.unrestrict_link(link), filename))
+                            # First try to get filename from files array if available
+                            filename = None
+                            unrestricted_url = None
+                            
+                            if i < len(files) and files[i].get('path'):
+                                full_path = files[i]['path']
+                                filename = full_path.split('/')[-1]
+                                logging.info(f"Link {i}: Using file path: {full_path} -> {filename}")
+                                
+                                # Validate filename
+                                if '.' not in filename or filename.endswith('.torrent'):
+                                    logging.warning(f"File path filename needs improvement: {filename}")
+                                    filename = None
+                            
+                            # If no good filename from files array, extract from unrestricted URL
+                            if not filename:
+                                unrestricted_url = self.unrestrict_link(link)
+                                if unrestricted_url:
+                                    filename = self.extract_filename_from_url(unrestricted_url)
+                                    logging.info(f"Link {i}: Using extracted filename from unrestricted URL: {filename}")
+                                else:
+                                    filename = 'download.mkv'
+                                    logging.warning(f"Link {i}: Could not unrestrict, using default: {filename}")
+                            
+                            # If we didn't unrestrict yet, do it now
+                            if not unrestricted_url:
+                                unrestricted_url = self.unrestrict_link(link)
+                            
+                            results.append((unrestricted_url or link, filename))
                     
                     return results
             time.sleep(10)
@@ -582,6 +693,22 @@ class MagnetHandler(FileSystemEventHandler):
         except Exception as e:
             logging.warning(f"Failed to get filename from headers: {e}")
         
+        try:
+            # Try unrestricting the link to get the actual download URL which might have a better filename
+            unrestricted_url = self.unrestrict_link(link)
+            if unrestricted_url and unrestricted_url != link:
+                import urllib.parse
+                parsed_url = urllib.parse.urlparse(unrestricted_url)
+                url_filename = parsed_url.path.split('/')[-1].split('?')[0]
+                if url_filename and '.' in url_filename:
+                    if '%' in url_filename:
+                        url_filename = urllib.parse.unquote(url_filename)
+                    filename = url_filename
+                    logging.info(f"Extracted filename from unrestricted URL: {filename}")
+                    return self.basic_sanitize_filename(filename)
+        except Exception as e:
+            logging.warning(f"Failed to extract filename from unrestricted URL: {e}")
+        
         # Final fallback to URL parsing
         try:
             url_filename = link.split('/')[-1].split('?')[0]
@@ -589,11 +716,46 @@ class MagnetHandler(FileSystemEventHandler):
                 import urllib.parse
                 url_filename = urllib.parse.unquote(url_filename)
             filename = url_filename if url_filename else 'download'
-            logging.info(f"Using fallback filename: {filename}")
+            
+            # If still no extension, try to add a generic one based on content-type
+            if '.' not in filename:
+                try:
+                    response = requests.head(link, timeout=5)
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'video' in content_type:
+                        filename += '.mp4'
+                    elif 'audio' in content_type:
+                        filename += '.mp3'
+                    elif 'application/zip' in content_type:
+                        filename += '.zip'
+                    elif 'application/x-rar' in content_type:
+                        filename += '.rar'
+                    else:
+                        filename += '.bin'  # Generic binary extension
+                    logging.info(f"Added extension based on content-type: {filename}")
+                except:
+                    filename += '.bin'  # Default fallback
+                    logging.info(f"Using fallback filename with generic extension: {filename}")
+            else:
+                logging.info(f"Using fallback filename: {filename}")
         except:
-            filename = 'download'
+            filename = 'download.bin'
             
         return self.basic_sanitize_filename(filename)
+    
+    def extract_filename_from_url(self, url):
+        """Extract filename from a URL (typically an unrestricted download URL)"""
+        try:
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(url)
+            url_filename = parsed_url.path.split('/')[-1].split('?')[0]
+            if url_filename and '.' in url_filename:
+                if '%' in url_filename:
+                    url_filename = urllib.parse.unquote(url_filename)
+                return url_filename
+        except:
+            pass
+        return 'download.mkv'
     
     def basic_sanitize_filename(self, filename):
         """Basic filename sanitization - only remove dangerous characters and limit length, preserve extension"""
@@ -651,28 +813,45 @@ class MagnetHandler(FileSystemEventHandler):
             response.raise_for_status()
             
             # Use the provided filename from torrent if available, otherwise extract from response
-            if rd_filename:
+            if rd_filename and '.' in rd_filename and len(rd_filename) > 16:
                 # Use the filename from the torrent file list - this is the correct original filename
+                # But only if it looks like a real filename (has extension and isn't too short/cryptic)
                 filename = rd_filename
-                logging.info(f"Using torrent filename: {filename}")
+                logging.info(f"Using provided filename: {filename}")
             else:
-                # Fallback: try to get filename from headers or URL
+                # Try to extract filename from the download URL first (unrestricted URL often has the real filename)
                 filename = None
-                cd_header = response.headers.get('content-disposition', '')
-                if 'filename=' in cd_header:
-                    filename = cd_header.split('filename=')[-1].strip('"').strip("'")
                 
-                if not filename:
+                # First try to get filename from the download URL path
+                try:
                     url_filename = download_url.split('/')[-1].split('?')[0]
                     if '%' in url_filename:
                         import urllib.parse
                         url_filename = urllib.parse.unquote(url_filename)
-                    filename = url_filename
+                    if url_filename and '.' in url_filename and len(url_filename) > 5:
+                        filename = url_filename
+                        logging.info(f"Extracted filename from download URL: {filename}")
+                except:
+                    pass
                 
+                # If that didn't work, try content-disposition header
+                if not filename:
+                    cd_header = response.headers.get('content-disposition', '')
+                    if 'filename=' in cd_header:
+                        filename = cd_header.split('filename=')[-1].strip('"').strip("'")
+                        logging.info(f"Extracted filename from headers: {filename}")
+                
+                # If we still don't have a good filename, use the provided rd_filename as fallback
+                if not filename and rd_filename:
+                    filename = rd_filename
+                    logging.info(f"Using fallback filename: {filename}")
+                
+                # Final fallback
                 if not filename:
                     filename = 'download'
+                    logging.info(f"Using default filename: {filename}")
                 
-                logging.info(f"Using extracted filename: {filename}")
+                logging.info(f"Final extracted filename: {filename}")
             
             # Only do basic filename sanitization (remove dangerous characters, limit length)
             original_filename = filename
@@ -705,18 +884,19 @@ class MagnetHandler(FileSystemEventHandler):
                     if total_size > 0:
                         progress = (downloaded / total_size) * 100
                         if file_path and file_path in self.download_progress:
-                            # Update individual file progress
-                            if file_index is not None and file_path in self.file_downloads:
-                                if file_index < len(self.file_downloads[file_path]):
-                                    self.file_downloads[file_path][file_index]['progress'] = int(progress)
-                                    self.file_downloads[file_path][file_index]['status'] = 'Downloading'
-                            
-                            # Update overall files progress (percentage of files completed)
-                            if file_path in self.file_downloads:
-                                total_files = len(self.file_downloads[file_path])
-                                completed_files = len([f for f in self.file_downloads[file_path] if f['progress'] == 100])
-                                files_progress = (completed_files / total_files * 100) if total_files > 0 else 0
-                                self.download_progress[file_path] = {'status': f'Downloading files ({completed_files}/{total_files} complete)', 'progress': 50 + int(files_progress * 0.5), 'cache_progress': 100, 'files_progress': int(files_progress)}
+                            # Thread-safe update of individual file progress
+                            with self.progress_lock:
+                                if file_index is not None and file_path in self.file_downloads:
+                                    if file_index < len(self.file_downloads[file_path]):
+                                        self.file_downloads[file_path][file_index]['progress'] = int(progress)
+                                        self.file_downloads[file_path][file_index]['status'] = 'Downloading'
+                                
+                                # Update overall files progress (percentage of files completed)
+                                if file_path in self.file_downloads:
+                                    total_files = len(self.file_downloads[file_path])
+                                    completed_files = len([f for f in self.file_downloads[file_path] if f['progress'] == 100])
+                                    files_progress = (completed_files / total_files * 100) if total_files > 0 else 0
+                                    self.download_progress[file_path] = {'status': f'Downloading files ({completed_files}/{total_files} complete)', 'progress': 50 + int(files_progress * 0.5), 'cache_progress': 100, 'files_progress': int(files_progress)}
                         if downloaded % (1024*1024*10) == 0:  # Log every 10MB
                             logging.debug(f"Download progress: {progress:.1f}%")
             
@@ -740,11 +920,12 @@ class MagnetHandler(FileSystemEventHandler):
                         logging.info(f"Archive extracted successfully to completed folder, removing original: {temp_path}")
                         try:
                             os.remove(temp_path)
-                            # Mark file as completed
-                            if file_index is not None and file_path and file_path in self.file_downloads:
-                                if file_index < len(self.file_downloads[file_path]):
-                                    self.file_downloads[file_path][file_index]['progress'] = 100
-                                    self.file_downloads[file_path][file_index]['status'] = 'Extracted'
+                            # Mark file as completed (thread-safe)
+                            with self.progress_lock:
+                                if file_index is not None and file_path and file_path in self.file_downloads:
+                                    if file_index < len(self.file_downloads[file_path]):
+                                        self.file_downloads[file_path][file_index]['progress'] = 100
+                                        self.file_downloads[file_path][file_index]['status'] = 'Extracted'
                             return  # Don't move the original file since we extracted it
                         except Exception as e:
                             logging.warning(f"Failed to remove original archive: {e}")
@@ -755,10 +936,11 @@ class MagnetHandler(FileSystemEventHandler):
                             failed_archive_path = os.path.join(self.completed_folder, f"FAILED_EXTRACT_{filename}")
                             os.rename(temp_path, failed_archive_path)
                             logging.info(f"Moved failed archive to: {failed_archive_path}")
-                            if file_index is not None and file_path and file_path in self.file_downloads:
-                                if file_index < len(self.file_downloads[file_path]):
-                                    self.file_downloads[file_path][file_index]['progress'] = 100
-                                    self.file_downloads[file_path][file_index]['status'] = 'Failed Extraction'
+                            with self.progress_lock:
+                                if file_index is not None and file_path and file_path in self.file_downloads:
+                                    if file_index < len(self.file_downloads[file_path]):
+                                        self.file_downloads[file_path][file_index]['progress'] = 100
+                                        self.file_downloads[file_path][file_index]['status'] = 'Failed Extraction'
                             return
                         except Exception as e:
                             logging.error(f"Failed to move failed archive: {e}")
@@ -775,11 +957,12 @@ class MagnetHandler(FileSystemEventHandler):
                     os.rename(temp_path, final_path)
                     logging.info(f"Download completed successfully: {final_path}")
                     
-                    # Mark file as completed
-                    if file_index is not None and file_path and file_path in self.file_downloads:
-                        if file_index < len(self.file_downloads[file_path]):
-                            self.file_downloads[file_path][file_index]['progress'] = 100
-                            self.file_downloads[file_path][file_index]['status'] = 'Completed'
+                    # Mark file as completed (thread-safe)
+                    with self.progress_lock:
+                        if file_index is not None and file_path and file_path in self.file_downloads:
+                            if file_index < len(self.file_downloads[file_path]):
+                                self.file_downloads[file_path][file_index]['progress'] = 100
+                                self.file_downloads[file_path][file_index]['status'] = 'Completed'
                     break
                 except (OSError, IOError) as e:
                     if attempt < 4:
