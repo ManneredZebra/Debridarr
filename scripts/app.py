@@ -37,6 +37,7 @@ class MagnetHandler(FileSystemEventHandler):
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.processing_files = set()  # Files currently being processed (upload phase)
         self.downloading_files = set()  # Files currently downloading (download phase)
+        self.queued_for_download = {}  # Files queued for download: {file_path: results}
         self.ready_to_download = {}  # Files ready for download: {file_path: results}
         self.download_progress = {}  # Track progress for each magnet file
         self.file_downloads = {}  # Track individual file downloads within torrents
@@ -44,6 +45,7 @@ class MagnetHandler(FileSystemEventHandler):
         self.retry_cooldown = {}  # Track cooldown timestamps for retries
         self.torrent_ids = {}  # Track torrent IDs for each magnet file
         self.progress_lock = threading.Lock()  # Lock for thread-safe progress updates
+        self.upload_timestamps = {}  # Track when files started uploading for ordering
     
     def reload_file_types(self):
         """Reload configuration - kept for compatibility but no longer filters by file type"""
@@ -67,6 +69,7 @@ class MagnetHandler(FileSystemEventHandler):
         # Always start upload phase immediately - no limit on uploads
         logging.info(f"New magnet/torrent file detected: {event.src_path}")
         self.processing_files.add(event.src_path)
+        self.upload_timestamps[event.src_path] = time.time()  # Record start time for ordering
         self.download_progress[event.src_path] = {'status': 'Starting', 'progress': 0, 'cache_progress': 0, 'download_progress': 0}
         
         try:
@@ -83,11 +86,13 @@ class MagnetHandler(FileSystemEventHandler):
         finally:
             self.processing_files.discard(file_path)
             self.downloading_files.discard(file_path)
+            self.queued_for_download.pop(file_path, None)
             self.download_progress.pop(file_path, None)
             self.file_downloads.pop(file_path, None)
             self.torrent_ids.pop(file_path, None)
             self.ready_to_download.pop(file_path, None)
-            self._process_next_queued()
+            self.upload_timestamps.pop(file_path, None)
+            self._process_download_queue()  # Try to start next queued download
     
     def process_magnet(self, file_path):
         try:
@@ -96,8 +101,8 @@ class MagnetHandler(FileSystemEventHandler):
             if not results:
                 return  # Failed during upload/cache phase
             
-            # PHASE 2: Wait for download slot and download files (limited by max_workers)
-            self._wait_and_download_files(file_path, results)
+            # PHASE 2: Queue for download (handled by queue system)
+            # The upload/cache phase queues the item automatically
             
         except PermissionError as e:
             logging.error(f"Permission denied accessing {file_path}: {e}")
@@ -202,9 +207,16 @@ class MagnetHandler(FileSystemEventHandler):
                     file_info = {'filename': filename, 'progress': 0, 'status': 'Queued'}
                     self.file_downloads[file_path].append(file_info)
             
-            # Update progress with file count
+            # Update progress with file count and queue for download
             total_files = len(self.file_downloads[file_path])
-            self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files) - Waiting for download slot', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+            self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files) - Queued for download', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+            
+            # Queue for download instead of downloading immediately
+            self.queued_for_download[file_path] = results
+            logging.info(f"Queued for download: {os.path.basename(file_path)} ({total_files} files)")
+            
+            # Try to start download if slots available
+            self._process_download_queue()
             
             return results
             
@@ -213,17 +225,44 @@ class MagnetHandler(FileSystemEventHandler):
             return None
     
     def _wait_and_download_files(self, file_path, results):
-        """Phase 2: Wait for download slot and download files (limited by max_workers)"""
-        try:
-            # Wait for a download slot
-            while len(self.downloading_files) >= self.max_workers:
-                if file_path not in self.processing_files:
-                    logging.info(f"Download aborted while waiting for slot: {file_path}")
-                    return
-                time.sleep(5)  # Check every 5 seconds for available slot
+        """Phase 2: This is now handled by the download queue system"""
+        # The download queue system will handle this automatically
+        pass
+    
+    def _process_download_queue(self):
+        """Process the download queue, starting downloads when slots are available"""
+        # Check how many download slots are available
+        available_slots = self.max_workers - len(self.downloading_files)
+        
+        if available_slots <= 0 or not self.queued_for_download:
+            return
+        
+        # Get queued items sorted by upload timestamp (oldest first)
+        queued_items = []
+        for file_path, results in self.queued_for_download.items():
+            if file_path in self.processing_files:  # Make sure it wasn't aborted
+                timestamp = self.upload_timestamps.get(file_path, 0)
+                queued_items.append((timestamp, file_path, results))
+        
+        # Sort by timestamp (oldest first)
+        queued_items.sort(key=lambda x: x[0])
+        
+        # Start downloads for available slots
+        for i in range(min(available_slots, len(queued_items))):
+            timestamp, file_path, results = queued_items[i]
             
-            # Got a download slot
+            # Move from queued to downloading
+            self.queued_for_download.pop(file_path, None)
             self.downloading_files.add(file_path)
+            
+            # Start the download in a separate thread
+            self.executor.submit(self._download_files_from_queue, file_path, results)
+            
+            logging.info(f"Started download from queue: {os.path.basename(file_path)}")
+    
+    def _download_files_from_queue(self, file_path, results):
+        """Download files for a queued item"""
+        try:
             total_files = len(self.file_downloads[file_path])
             self.download_progress[file_path] = {'status': f'Downloading files ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
             
@@ -337,6 +376,10 @@ class MagnetHandler(FileSystemEventHandler):
                         
         except Exception as e:
             logging.error(f"Error in download phase for {file_path}: {e}")
+        finally:
+            # Always remove from downloading_files and try to process next in queue
+            self.downloading_files.discard(file_path)
+            self._process_download_queue()  # Try to start next queued download
     
     def get_api_token(self):
         try:
@@ -1274,10 +1317,7 @@ class MagnetHandler(FileSystemEventHandler):
         except Exception as e:
             logging.error(f"Compressed file extraction failed: {e}")
             return False
-    
-    def _process_next_queued(self):
-        # No longer needed since we don't queue uploads, only downloads are limited
-        pass
+
     
     def move_queue_item(self, file_path, direction):
         # Queue movement no longer supported since uploads are unlimited

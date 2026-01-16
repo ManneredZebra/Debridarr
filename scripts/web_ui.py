@@ -48,6 +48,9 @@ class WebUI:
             status = {}
             for client_name, handler, _ in self.handlers:
                 downloads = []
+                queued = []
+                
+                # Active downloads (uploading/caching or downloading)
                 for file_path in handler.processing_files:
                     filename = os.path.basename(file_path)
                     progress_info = handler.download_progress.get(file_path, {'status': 'Processing', 'progress': 0, 'cache_progress': 0, 'download_progress': 0})
@@ -55,9 +58,16 @@ class WebUI:
                     
                     # Determine if this is uploading/caching or downloading
                     is_downloading = file_path in handler.downloading_files
-                    phase = "Downloading" if is_downloading else "Uploading/Caching"
+                    is_queued = file_path in handler.queued_for_download
                     
-                    downloads.append({
+                    if is_queued:
+                        phase = "Queued for Download"
+                    elif is_downloading:
+                        phase = "Downloading"
+                    else:
+                        phase = "Uploading/Caching"
+                    
+                    download_item = {
                         'filename': filename,
                         'filepath': file_path,
                         'status': progress_info['status'],
@@ -65,15 +75,27 @@ class WebUI:
                         'cache_progress': progress_info.get('cache_progress', 0),
                         'files_progress': progress_info.get('files_progress', 0),
                         'files': file_downloads,
-                        'queued': False,
-                        'phase': phase
-                    })
-                # No longer using queued_files since uploads are unlimited
+                        'queued': is_queued,
+                        'phase': phase,
+                        'timestamp': handler.upload_timestamps.get(file_path, 0)
+                    }
+                    
+                    if is_queued:
+                        queued.append(download_item)
+                    else:
+                        downloads.append(download_item)
+                
+                # Sort downloads by timestamp (oldest first)
+                downloads.sort(key=lambda x: x['timestamp'])
+                queued.sort(key=lambda x: x['timestamp'])
+                
                 status[client_name] = {
                     'active_downloads': len(handler.processing_files),
                     'downloading_count': len(handler.downloading_files),
-                    'uploading_count': len(handler.processing_files) - len(handler.downloading_files),
-                    'downloads': downloads
+                    'uploading_count': len(handler.processing_files) - len(handler.downloading_files) - len(handler.queued_for_download),
+                    'queued_count': len(handler.queued_for_download),
+                    'downloads': downloads,
+                    'queued': queued
                 }
             return jsonify(status)
             
@@ -885,6 +907,10 @@ HTML_TEMPLATE = '''
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Downloading</div>
                                 </div>
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${status.queued_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Queued</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
                                     <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${clientCounts.magnets}</div>
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Magnets</div>
                                 </div>
@@ -946,104 +972,157 @@ HTML_TEMPLATE = '''
                         
                         statusCards.appendChild(card);
                         
-                        // Sort downloads: downloading first, then by oldest first (assuming filename contains timestamp or order)
-                        const sortedDownloads = [...status.downloads].sort((a, b) => {
-                            // First priority: downloading phase comes before uploading
-                            if (a.phase === 'Downloading' && b.phase !== 'Downloading') return -1;
-                            if (b.phase === 'Downloading' && a.phase !== 'Downloading') return 1;
+                        // Active downloads section
+                        if (status.downloads && status.downloads.length > 0) {
+                            // Add section header for active downloads
+                            const activeHeader = document.createElement('div');
+                            activeHeader.style.cssText = 'font-size: 18px; font-weight: bold; margin: 20px 0 10px 0; color: #007acc; border-bottom: 2px solid #007acc; padding-bottom: 5px;';
+                            activeHeader.textContent = `${client.toUpperCase()} - Active Downloads (${status.downloads.length})`;
+                            downloadList.appendChild(activeHeader);
                             
-                            // Second priority: sort by filename (oldest first - assuming timestamp in filename)
-                            return a.filename.localeCompare(b.filename);
-                        });
+                            // Downloads are already sorted by timestamp (oldest first) from the API
+                            status.downloads.forEach(download => {
+                                const item = document.createElement('div');
+                                item.className = 'download-item';
+                                
+                                // Add phase indicator styling
+                                if (download.phase === 'Downloading') {
+                                    item.style.borderLeft = '4px solid #007acc';
+                                } else {
+                                    item.style.borderLeft = '4px solid #28a745';
+                                }
+                                
+                                // Add buttons at top
+                                const btnContainer = document.createElement('div');
+                                btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
+                                
+                                const abortBtn = document.createElement('button');
+                                abortBtn.className = 'abort-btn';
+                                abortBtn.textContent = 'Abort';
+                                abortBtn.onclick = function() { abortDownload(client, download.filename); };
+                                btnContainer.appendChild(abortBtn);
+                                
+                                item.appendChild(btnContainer);
+                                
+                                const contentDiv = document.createElement('div');
+                                contentDiv.innerHTML = `
+                                    <strong>${client.toUpperCase()}</strong>: ${download.filename}
+                                    <div><span style="color: ${download.phase === 'Downloading' ? '#007acc' : '#28a745'};">📁 ${download.phase}</span> - ${download.status}</div>
+                                    <div class="progress-container">
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Real-Debrid Cache</div>
+                                            <div class="progress-bar cache-progress">
+                                                <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
+                                                <div class="progress-text">${download.cache_progress}%</div>
+                                            </div>
+                                        </div>
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Files Complete</div>
+                                            <div class="progress-bar download-progress">
+                                                <div class="progress-fill" style="width: ${download.files_progress || 0}%"></div>
+                                                <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                                item.appendChild(contentDiv);
+                                
+                                // Add individual file progress bars if files exist
+                                if (download.files && download.files.length > 0) {
+                                    const filesDiv = document.createElement('div');
+                                    filesDiv.style.marginTop = '10px';
+                                    filesDiv.innerHTML = '<strong>Individual Files:</strong>';
+                                    
+                                    download.files.forEach(file => {
+                                        const fileDiv = document.createElement('div');
+                                        fileDiv.style.cssText = 'margin: 5px 0; padding: 5px; background: #333; border-radius: 3px;';
+                                        
+                                        const displayName = file.filename.split('/').pop().split(String.fromCharCode(92)).pop().replace(/^[a-f0-9]{32,}[._-]?/i, '');
+                                        
+                                        const nameDiv = document.createElement('div');
+                                        nameDiv.style.cssText = 'font-size: 12px; margin-bottom: 3px;';
+                                        nameDiv.textContent = displayName + ' (' + file.status + ')';
+                                        
+                                        const progressDiv = document.createElement('div');
+                                        progressDiv.className = 'progress-bar download-progress';
+                                        progressDiv.style.cssText = 'height: 15px; margin: 0;';
+                                        
+                                        const fillDiv = document.createElement('div');
+                                        fillDiv.className = 'progress-fill';
+                                        fillDiv.style.width = file.progress + '%';
+                                        
+                                        const textDiv = document.createElement('div');
+                                        textDiv.className = 'progress-text';
+                                        textDiv.style.cssText = 'line-height: 15px; font-size: 10px;';
+                                        textDiv.textContent = file.progress + '%';
+                                        
+                                        progressDiv.appendChild(fillDiv);
+                                        progressDiv.appendChild(textDiv);
+                                        fileDiv.appendChild(nameDiv);
+                                        fileDiv.appendChild(progressDiv);
+                                        filesDiv.appendChild(fileDiv);
+                                    });
+                                    
+                                    contentDiv.appendChild(filesDiv);
+                                }
+                                
+                                downloadList.appendChild(item);
+                            });
+                        }
                         
-                        // Download items
-                        sortedDownloads.forEach(download => {
-                            const item = document.createElement('div');
-                            item.className = 'download-item';
+                        // Queued downloads section
+                        if (status.queued && status.queued.length > 0) {
+                            // Add section header for queued downloads
+                            const queuedHeader = document.createElement('div');
+                            queuedHeader.style.cssText = 'font-size: 18px; font-weight: bold; margin: 30px 0 10px 0; color: #ffc107; border-bottom: 2px solid #ffc107; padding-bottom: 5px;';
+                            queuedHeader.textContent = `${client.toUpperCase()} - Download Queue (${status.queued.length})`;
+                            downloadList.appendChild(queuedHeader);
                             
-                            // Add phase indicator styling
-                            if (download.phase === 'Downloading') {
-                                item.style.borderLeft = '4px solid #007acc';
-                            } else {
-                                item.style.borderLeft = '4px solid #28a745';
-                            }
-                            
-                            // Add buttons at top
-                            const btnContainer = document.createElement('div');
-                            btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
-                            
-                            const abortBtn = document.createElement('button');
-                            abortBtn.className = 'abort-btn';
-                            abortBtn.textContent = 'Abort';
-                            abortBtn.onclick = function() { abortDownload(client, download.filename); };
-                            btnContainer.appendChild(abortBtn);
-                            
-                            item.appendChild(btnContainer);
-                            
-                            const contentDiv = document.createElement('div');
-                            contentDiv.innerHTML = `
-                                <strong>${client.toUpperCase()}</strong>: ${download.filename}
-                                <div><span style="color: ${download.phase === 'Downloading' ? '#007acc' : '#28a745'};">📁 ${download.phase}</span> - ${download.status}</div>
-                                <div class="progress-container">
-                                    <div style="flex: 1;">
-                                        <div class="progress-label">Real-Debrid Cache</div>
-                                        <div class="progress-bar cache-progress">
-                                            <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
-                                            <div class="progress-text">${download.cache_progress}%</div>
+                            // Queued items are already sorted by timestamp (oldest first) from the API
+                            status.queued.forEach((download, index) => {
+                                const item = document.createElement('div');
+                                item.className = 'download-item';
+                                item.style.borderLeft = '4px solid #ffc107';
+                                item.style.opacity = '0.8';  // Slightly faded to show it's queued
+                                
+                                // Add buttons at top
+                                const btnContainer = document.createElement('div');
+                                btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
+                                
+                                const abortBtn = document.createElement('button');
+                                abortBtn.className = 'abort-btn';
+                                abortBtn.textContent = 'Abort';
+                                abortBtn.onclick = function() { abortDownload(client, download.filename); };
+                                btnContainer.appendChild(abortBtn);
+                                
+                                item.appendChild(btnContainer);
+                                
+                                const contentDiv = document.createElement('div');
+                                contentDiv.innerHTML = `
+                                    <strong>${client.toUpperCase()}</strong>: ${download.filename}
+                                    <div><span style="color: #ffc107;">⏳ Position ${index + 1} in queue</span> - ${download.status}</div>
+                                    <div class="progress-container">
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Real-Debrid Cache</div>
+                                            <div class="progress-bar cache-progress">
+                                                <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
+                                                <div class="progress-text">${download.cache_progress}%</div>
+                                            </div>
+                                        </div>
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Ready for Download</div>
+                                            <div class="progress-bar download-progress">
+                                                <div class="progress-fill" style="width: 100%; background: #ffc107;"></div>
+                                                <div class="progress-text">Queued</div>
+                                            </div>
                                         </div>
                                     </div>
-                                    <div style="flex: 1;">
-                                        <div class="progress-label">Files Complete</div>
-                                        <div class="progress-bar download-progress">
-                                            <div class="progress-fill" style="width: ${download.files_progress || 0}%"></div>
-                                            <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                            item.appendChild(contentDiv);
-                            
-                            // Add individual file progress bars if files exist
-                            if (download.files && download.files.length > 0) {
-                                const filesDiv = document.createElement('div');
-                                filesDiv.style.marginTop = '10px';
-                                filesDiv.innerHTML = '<strong>Individual Files:</strong>';
+                                `;
+                                item.appendChild(contentDiv);
                                 
-                                download.files.forEach(file => {
-                                    const fileDiv = document.createElement('div');
-                                    fileDiv.style.cssText = 'margin: 5px 0; padding: 5px; background: #333; border-radius: 3px;';
-                                    
-                                    const displayName = file.filename.split('/').pop().split(String.fromCharCode(92)).pop().replace(/^[a-f0-9]{32,}[._-]?/i, '');
-                                    
-                                    const nameDiv = document.createElement('div');
-                                    nameDiv.style.cssText = 'font-size: 12px; margin-bottom: 3px;';
-                                    nameDiv.textContent = displayName + ' (' + file.status + ')';
-                                    
-                                    const progressDiv = document.createElement('div');
-                                    progressDiv.className = 'progress-bar download-progress';
-                                    progressDiv.style.cssText = 'height: 15px; margin: 0;';
-                                    
-                                    const fillDiv = document.createElement('div');
-                                    fillDiv.className = 'progress-fill';
-                                    fillDiv.style.width = file.progress + '%';
-                                    
-                                    const textDiv = document.createElement('div');
-                                    textDiv.className = 'progress-text';
-                                    textDiv.style.cssText = 'line-height: 15px; font-size: 10px;';
-                                    textDiv.textContent = file.progress + '%';
-                                    
-                                    progressDiv.appendChild(fillDiv);
-                                    progressDiv.appendChild(textDiv);
-                                    fileDiv.appendChild(nameDiv);
-                                    fileDiv.appendChild(progressDiv);
-                                    filesDiv.appendChild(fileDiv);
-                                });
-                                
-                                contentDiv.appendChild(filesDiv);
-                            }
-                            
-                            downloadList.appendChild(item);
-                        });
+                                downloadList.appendChild(item);
+                            });
+                        }
                     });
                     
                     if (downloadList.innerHTML === '') {
