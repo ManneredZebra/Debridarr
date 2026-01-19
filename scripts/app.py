@@ -83,7 +83,9 @@ class MagnetHandler(FileSystemEventHandler):
     def _process_magnet_wrapper(self, file_path):
         try:
             self.process_magnet(file_path)
-        finally:
+        except Exception as e:
+            logging.error(f"Error in magnet processing wrapper: {e}")
+            # Only clean up on error - successful processing will be cleaned up by download completion
             self.processing_files.discard(file_path)
             self.downloading_files.discard(file_path)
             self.queued_for_download.pop(file_path, None)
@@ -377,8 +379,15 @@ class MagnetHandler(FileSystemEventHandler):
         except Exception as e:
             logging.error(f"Error in download phase for {file_path}: {e}")
         finally:
-            # Always remove from downloading_files and try to process next in queue
+            # Always remove from downloading_files and clean up all tracking
             self.downloading_files.discard(file_path)
+            self.processing_files.discard(file_path)
+            self.queued_for_download.pop(file_path, None)
+            self.download_progress.pop(file_path, None)
+            self.file_downloads.pop(file_path, None)
+            self.torrent_ids.pop(file_path, None)
+            self.ready_to_download.pop(file_path, None)
+            self.upload_timestamps.pop(file_path, None)
             self._process_download_queue()  # Try to start next queued download
     
     def get_api_token(self):
@@ -620,90 +629,21 @@ class MagnetHandler(FileSystemEventHandler):
                     logging.info(f"Processing {len(links)} links and {len(files)} files from torrent")
                     logging.debug(f"Raw torrent files data: {files}")
                     
-                    # Try different approaches to match links with filenames
-                    if len(links) == len(files):
-                        # If same length, try index matching but with validation
-                        logging.info("Same number of links and files, using index matching")
-                        for i, link in enumerate(links):
-                            unrestricted_url = None
-                            
-                            if files[i].get('path'):
-                                # Handle nested folder structures in torrent files
-                                full_path = files[i]['path']
-                                filename = full_path.split('/')[-1]  # Get just the filename, not the full path
-                                file_size = files[i].get('bytes', 0)
-                                logging.info(f"Link {i}: Full path: {full_path}, Filename: {filename} ({file_size} bytes)")
-                                
-                                # Validate that the filename has an extension and isn't just the torrent name
-                                if '.' not in filename or filename.endswith('.torrent'):
-                                    logging.warning(f"Filename lacks proper extension or is torrent name: {filename}")
-                                    # Try to get filename from unrestricted URL
-                                    unrestricted_url = self.unrestrict_link(link)
-                                    if unrestricted_url:
-                                        fallback_filename = self.extract_filename_from_url(unrestricted_url)
-                                        if '.' in fallback_filename and not fallback_filename.endswith('.torrent'):
-                                            filename = fallback_filename
-                                            logging.info(f"Using filename from unrestricted URL: {filename}")
-                                        else:
-                                            # If we still don't have a good filename, try to construct one
-                                            base_name = filename.replace('.torrent', '') if filename.endswith('.torrent') else filename
-                                            filename = f"{base_name}.mkv"  # Default to video file
-                                            logging.info(f"Using constructed filename: {filename}")
-                                    else:
-                                        # If unrestrict failed, construct a filename
-                                        base_name = filename.replace('.torrent', '') if filename.endswith('.torrent') else filename
-                                        filename = f"{base_name}.mkv"  # Default to video file
-                                        logging.info(f"Using constructed filename (unrestrict failed): {filename}")
-                            else:
-                                # Try to get filename from unrestricted URL
-                                unrestricted_url = self.unrestrict_link(link)
-                                if unrestricted_url:
-                                    filename = self.extract_filename_from_url(unrestricted_url)
-                                    logging.info(f"Link {i}: Extracted from unrestricted URL: {filename}")
-                                else:
-                                    filename = 'download.mkv'
-                                    logging.warning(f"Link {i}: Could not unrestrict link, using default: {filename}")
-                            
-                            # If we didn't unrestrict yet, do it now
-                            if not unrestricted_url:
-                                unrestricted_url = self.unrestrict_link(link)
-                            
-                            results.append((unrestricted_url or link, filename))
-                    else:
-                        # Different lengths - this might be the problem
-                        logging.warning(f"Mismatch: {len(links)} links vs {len(files)} files")
+                    # Always extract filenames directly from download URLs to avoid mismatches
+                    # This ensures the filename matches the actual file being downloaded
+                    logging.info(f"Extracting filenames directly from {len(links)} download URLs")
+                    
+                    for i, link in enumerate(links):
+                        # Always get filename from unrestricted URL to ensure accuracy
+                        unrestricted_url = self.unrestrict_link(link)
+                        if unrestricted_url:
+                            filename = self.extract_filename_from_url(unrestricted_url)
+                            logging.info(f"Link {i}: Extracted filename from download URL: {filename}")
+                        else:
+                            filename = f'download_{i+1}.mkv'
+                            logging.warning(f"Link {i}: Could not unrestrict, using default: {filename}")
                         
-                        # Try to extract filenames from the links themselves as a safer approach
-                        for i, link in enumerate(links):
-                            # First try to get filename from files array if available
-                            filename = None
-                            unrestricted_url = None
-                            
-                            if i < len(files) and files[i].get('path'):
-                                full_path = files[i]['path']
-                                filename = full_path.split('/')[-1]
-                                logging.info(f"Link {i}: Using file path: {full_path} -> {filename}")
-                                
-                                # Validate filename
-                                if '.' not in filename or filename.endswith('.torrent'):
-                                    logging.warning(f"File path filename needs improvement: {filename}")
-                                    filename = None
-                            
-                            # If no good filename from files array, extract from unrestricted URL
-                            if not filename:
-                                unrestricted_url = self.unrestrict_link(link)
-                                if unrestricted_url:
-                                    filename = self.extract_filename_from_url(unrestricted_url)
-                                    logging.info(f"Link {i}: Using extracted filename from unrestricted URL: {filename}")
-                                else:
-                                    filename = 'download.mkv'
-                                    logging.warning(f"Link {i}: Could not unrestrict, using default: {filename}")
-                            
-                            # If we didn't unrestrict yet, do it now
-                            if not unrestricted_url:
-                                unrestricted_url = self.unrestrict_link(link)
-                            
-                            results.append((unrestricted_url or link, filename))
+                        results.append((unrestricted_url or link, filename))
                     
                     return results
             time.sleep(10)
@@ -855,46 +795,22 @@ class MagnetHandler(FileSystemEventHandler):
             response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # Use the provided filename from torrent if available, otherwise extract from response
-            if rd_filename and '.' in rd_filename and len(rd_filename) > 16:
-                # Use the filename from the torrent file list - this is the correct original filename
-                # But only if it looks like a real filename (has extension and isn't too short/cryptic)
+            # Use the provided filename if available, otherwise extract from download URL
+            if rd_filename:
                 filename = rd_filename
                 logging.info(f"Using provided filename: {filename}")
             else:
-                # Try to extract filename from the download URL first (unrestricted URL often has the real filename)
-                filename = None
-                
-                # First try to get filename from the download URL path
+                # Extract filename directly from the download URL
                 try:
                     url_filename = download_url.split('/')[-1].split('?')[0]
                     if '%' in url_filename:
                         import urllib.parse
                         url_filename = urllib.parse.unquote(url_filename)
-                    if url_filename and '.' in url_filename and len(url_filename) > 5:
-                        filename = url_filename
-                        logging.info(f"Extracted filename from download URL: {filename}")
+                    filename = url_filename if url_filename else 'download.mkv'
+                    logging.info(f"Extracted filename from download URL: {filename}")
                 except:
-                    pass
-                
-                # If that didn't work, try content-disposition header
-                if not filename:
-                    cd_header = response.headers.get('content-disposition', '')
-                    if 'filename=' in cd_header:
-                        filename = cd_header.split('filename=')[-1].strip('"').strip("'")
-                        logging.info(f"Extracted filename from headers: {filename}")
-                
-                # If we still don't have a good filename, use the provided rd_filename as fallback
-                if not filename and rd_filename:
-                    filename = rd_filename
+                    filename = 'download.mkv'
                     logging.info(f"Using fallback filename: {filename}")
-                
-                # Final fallback
-                if not filename:
-                    filename = 'download'
-                    logging.info(f"Using default filename: {filename}")
-                
-                logging.info(f"Final extracted filename: {filename}")
             
             # Only do basic filename sanitization (remove dangerous characters, limit length)
             original_filename = filename
@@ -915,8 +831,8 @@ class MagnetHandler(FileSystemEventHandler):
             
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=self.chunk_size):
-                    # Check if download was aborted
-                    if file_path and file_path not in self.download_progress:
+                    # Check if download was aborted - use processing_files as the source of truth
+                    if file_path and file_path not in self.processing_files:
                         logging.info(f"Download aborted during file transfer: {filename}")
                         f.close()
                         if os.path.exists(temp_path):

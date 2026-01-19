@@ -182,10 +182,12 @@ class WebUI:
                         # Remove from all tracking
                         handler.processing_files.discard(file_path)
                         handler.downloading_files.discard(file_path)
+                        handler.queued_for_download.pop(file_path, None)
                         handler.download_progress.pop(file_path, None)
                         handler.file_downloads.pop(file_path, None)
                         handler.torrent_ids.pop(file_path, None)
                         handler.ready_to_download.pop(file_path, None)
+                        handler.upload_timestamps.pop(file_path, None)
                         
                         # Remove magnet file if it exists
                         try:
@@ -193,6 +195,9 @@ class WebUI:
                                 os.remove(file_path)
                         except:
                             pass
+                        
+                        # Try to start next queued download
+                        handler._process_download_queue()
                         
                         return jsonify({'success': True, 'message': f'Aborted {filename}'})
             return jsonify({'success': False, 'message': 'Download not found'})
