@@ -102,14 +102,77 @@ class WebUI:
         @self.app.route('/api/logs')
         def get_logs():
             try:
+                # Get pagination parameters
+                lines_per_page = int(request.args.get('lines', 100))  # Default 100 lines
+                page = int(request.args.get('page', 1))  # Page 1 is most recent
+                
                 base_dir = 'C:\\ProgramData\\Debridarr'
                 log_file = os.path.join(base_dir, 'logs', 'debridarr.log')
-                with open(log_file, 'r') as f:
+                
+                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                    lines = content.split('\n')[-100:]  # Last 100 lines
-                return jsonify({'logs': lines})
-            except:
-                return jsonify({'logs': ['No logs available']})
+                    all_lines = [line for line in content.split('\n') if line.strip()]
+                
+                # Calculate pagination
+                total_lines = len(all_lines)
+                total_pages = max(1, (total_lines + lines_per_page - 1) // lines_per_page)
+                
+                # Get lines for requested page (page 1 = most recent)
+                start_idx = max(0, total_lines - (page * lines_per_page))
+                end_idx = total_lines - ((page - 1) * lines_per_page)
+                page_lines = all_lines[start_idx:end_idx]
+                
+                # Process lines for color coding
+                processed_lines = []
+                for line in page_lines:
+                    line_lower = line.lower()
+                    if 'error' in line_lower or 'failed' in line_lower:
+                        processed_lines.append({
+                            'text': line,
+                            'level': 'error',
+                            'color': '#ff6b6b'
+                        })
+                    elif 'warning' in line_lower or 'warn' in line_lower:
+                        processed_lines.append({
+                            'text': line,
+                            'level': 'warning', 
+                            'color': '#ffd93d'
+                        })
+                    elif 'info' in line_lower:
+                        processed_lines.append({
+                            'text': line,
+                            'level': 'info',
+                            'color': '#6bcf7f'
+                        })
+                    elif 'debug' in line_lower:
+                        processed_lines.append({
+                            'text': line,
+                            'level': 'debug',
+                            'color': '#74c0fc'
+                        })
+                    else:
+                        processed_lines.append({
+                            'text': line,
+                            'level': 'default',
+                            'color': '#ffffff'
+                        })
+                
+                return jsonify({
+                    'logs': processed_lines,
+                    'pagination': {
+                        'current_page': page,
+                        'total_pages': total_pages,
+                        'lines_per_page': lines_per_page,
+                        'total_lines': total_lines,
+                        'has_next': page < total_pages,
+                        'has_prev': page > 1
+                    }
+                })
+            except Exception as e:
+                return jsonify({
+                    'logs': [{'text': f'Error loading logs: {str(e)}', 'level': 'error', 'color': '#ff6b6b'}],
+                    'pagination': {'current_page': 1, 'total_pages': 1, 'lines_per_page': 100, 'total_lines': 0, 'has_next': False, 'has_prev': False}
+                })
                 
         @self.app.route('/api/health')
         def get_health():
@@ -429,11 +492,18 @@ class WebUI:
         def get_config():
             try:
                 with open(self.config_path, 'r') as f:
-                    config = yaml.safe_load(f)
+                    config = yaml.safe_load(f) or {}
                 # Mask API token for display
                 if 'real_debrid_api_token' in config:
                     token = config['real_debrid_api_token']
                     config['real_debrid_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
+                
+                # Ensure log settings exist with defaults
+                if 'log_max_size_mb' not in config:
+                    config['log_max_size_mb'] = 1
+                if 'log_backup_count' not in config:
+                    config['log_backup_count'] = 5
+                
                 # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in config:
                     config['file_categories'] = {
@@ -509,6 +579,27 @@ class WebUI:
                 # Ensure auto_extract_archives has a default value
                 if 'auto_extract_archives' not in new_config:
                     new_config['auto_extract_archives'] = True
+                
+                # Ensure log settings have defaults
+                if 'log_max_size_mb' not in new_config:
+                    new_config['log_max_size_mb'] = 1
+                if 'log_backup_count' not in new_config:
+                    new_config['log_backup_count'] = 5
+                
+                # Validate log settings
+                try:
+                    log_max_size = int(new_config['log_max_size_mb'])
+                    if log_max_size < 1 or log_max_size > 100:
+                        new_config['log_max_size_mb'] = 1
+                except:
+                    new_config['log_max_size_mb'] = 1
+                
+                try:
+                    log_backup_count = int(new_config['log_backup_count'])
+                    if log_backup_count < 1 or log_backup_count > 20:
+                        new_config['log_backup_count'] = 5
+                except:
+                    new_config['log_backup_count'] = 5
                 
                 # Write updated config
                 with open(self.config_path, 'w') as f:
@@ -666,7 +757,11 @@ HTML_TEMPLATE = '''
         .cache-progress .progress-fill { background: #28a745; }
         .download-progress .progress-fill { background: #007acc; }
         .progress-label { font-size: 13px; color: #ccc; margin-bottom: 2px; }
-        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: monospace; font-size: 14px; }
+        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; border: 1px solid #333; }
+        .logs::-webkit-scrollbar { width: 8px; }
+        .logs::-webkit-scrollbar-track { background: #1a1a1a; }
+        .logs::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        .logs::-webkit-scrollbar-thumb:hover { background: #555; }
         .status-good { color: #28a745; font-size: 15px; }
         .status-active { color: #ffc107; font-size: 15px; }
         .settings-group { background: #2d2d2d; padding: 20px; margin: 15px 0; border-radius: 5px; }
@@ -779,8 +874,23 @@ HTML_TEMPLATE = '''
                 <div id="completed-list"></div>
             </div>
             <div id="logs" class="section">
-                <h1>System Logs</h1>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h1 style="margin: 0;">System Logs</h1>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <label style="color: #ccc; font-size: 14px;">Lines per page:</label>
+                        <select id="logs-per-page" style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px; font-size: 14px;">
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="200">200</option>
+                            <option value="500">500</option>
+                        </select>
+                        <button onclick="loadLogs()" style="background: #007acc; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
                 <div id="log-content" class="logs"></div>
+                <div id="logs-pagination" style="margin-top: 15px; text-align: center; color: #ccc; font-size: 14px;"></div>
             </div>
             <div id="settings" class="section">
                 <h1>Settings</h1>
@@ -846,6 +956,14 @@ HTML_TEMPLATE = '''
                     }
                 })
                 .catch(err => console.error('loadHealth error:', err));
+        }
+        
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
         
         function loadStatus() {
@@ -1044,9 +1162,17 @@ HTML_TEMPLATE = '''
                                         
                                         const displayName = file.filename.split('/').pop().split(String.fromCharCode(92)).pop().replace(/^[a-f0-9]{32,}[._-]?/i, '');
                                         
+                                        // Format file size
+                                        let sizeText = '';
+                                        if (file.size && file.size > 0) {
+                                            const size = formatFileSize(file.size);
+                                            const downloaded = formatFileSize(file.downloaded || 0);
+                                            sizeText = ` - ${downloaded} / ${size}`;
+                                        }
+                                        
                                         const nameDiv = document.createElement('div');
                                         nameDiv.style.cssText = 'font-size: 12px; margin-bottom: 3px;';
-                                        nameDiv.textContent = displayName + ' (' + file.status + ')';
+                                        nameDiv.textContent = displayName + ' (' + file.status + ')' + sizeText;
                                         
                                         const progressDiv = document.createElement('div');
                                         progressDiv.className = 'progress-bar download-progress';
@@ -1144,14 +1270,107 @@ HTML_TEMPLATE = '''
                 .catch(err => console.error('loadStatus error:', err));
         }
 
-        function loadLogs() {
-            fetch('/api/logs')
+        let currentLogsPage = 1;
+        
+        function loadLogs(page = 1) {
+            const linesPerPage = document.getElementById('logs-per-page') ? document.getElementById('logs-per-page').value : 100;
+            currentLogsPage = page;
+            
+            fetch('/api/logs?page=' + page + '&lines=' + linesPerPage)
                 .then(r => r.json())
                 .then(data => {
-                    document.getElementById('log-content').innerHTML = data.logs.join('<br>');
+                    const logContent = document.getElementById('log-content');
+                    if (data.logs && data.logs.length > 0) {
+                        const logHtml = data.logs.map(log => {
+                            if (typeof log === 'string') {
+                                return '<div style="color: #ffffff; margin: 2px 0; font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.4;">' + log + '</div>';
+                            } else {
+                                return '<div style="color: ' + log.color + '; margin: 2px 0; font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.4;">' + log.text + '</div>';
+                            }
+                        }).join('');
+                        logContent.innerHTML = logHtml;
+                    } else {
+                        logContent.innerHTML = '<div style="color: #ff6b6b;">No logs available</div>';
+                    }
+                    
+                    if (data.pagination) {
+                        updateLogsPagination(data.pagination);
+                    }
+                    
+                    if (page === 1) {
+                        logContent.scrollTop = logContent.scrollHeight;
+                    } else {
+                        logContent.scrollTop = 0;
+                    }
                 })
-                .catch(err => console.error('loadLogs error:', err));
+                .catch(err => {
+                    console.error('loadLogs error:', err);
+                    document.getElementById('log-content').innerHTML = '<div style="color: #ff6b6b;">Error loading logs</div>';
+                });
         }
+        
+        function updateLogsPagination(pagination) {
+            const paginationDiv = document.getElementById('logs-pagination');
+            if (!paginationDiv) return;
+            
+            if (pagination.total_pages <= 1) {
+                paginationDiv.innerHTML = '';
+                return;
+            }
+            
+            let html = 'Page: ';
+            
+            // Previous link
+            if (pagination.has_prev) {
+                html += '<a href="#" onclick="loadLogs(' + (pagination.current_page - 1) + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">← Newer</a> ';
+            }
+            
+            // Page numbers
+            const startPage = Math.max(1, pagination.current_page - 3);
+            const endPage = Math.min(pagination.total_pages, pagination.current_page + 3);
+            
+            if (startPage > 1) {
+                html += '<a href="#" onclick="loadLogs(1); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">1</a>';
+                if (startPage > 2) {
+                    html += ' <span style="color: #666;">...</span> ';
+                }
+            }
+            
+            for (let i = startPage; i <= endPage; i++) {
+                if (i === pagination.current_page) {
+                    html += '<span style="color: #fff; font-weight: bold; margin: 0 3px;">' + i + '</span>';
+                } else {
+                    html += '<a href="#" onclick="loadLogs(' + i + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">' + i + '</a>';
+                }
+            }
+            
+            if (endPage < pagination.total_pages) {
+                if (endPage < pagination.total_pages - 1) {
+                    html += ' <span style="color: #666;">...</span> ';
+                }
+                html += '<a href="#" onclick="loadLogs(' + pagination.total_pages + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">' + pagination.total_pages + '</a>';
+            }
+            
+            // Next link
+            if (pagination.has_next) {
+                html += ' <a href="#" onclick="loadLogs(' + (pagination.current_page + 1) + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">Older →</a>';
+            }
+            
+            // Add page info
+            const startLine = ((pagination.current_page - 1) * pagination.lines_per_page) + 1;
+            const endLine = Math.min(pagination.current_page * pagination.lines_per_page, pagination.total_lines);
+            html += ' <span style="color: #666; margin-left: 15px;">(Showing lines ' + startLine + '-' + endLine + ' of ' + pagination.total_lines + ')</span>';
+            
+            paginationDiv.innerHTML = html;
+        }
+        
+        // Add event listener for lines per page change
+        document.addEventListener('DOMContentLoaded', function() {
+            const linesSelect = document.getElementById('logs-per-page');
+            if (linesSelect) {
+                linesSelect.addEventListener('change', () => loadLogs(1));
+            }
+        });
 
         function abortDownload(client, filename) {
             if (confirm(`Are you sure you want to abort the download of "${filename}"?`)) {
@@ -1604,6 +1823,11 @@ HTML_TEMPLATE = '''
             fetch('/api/config')
                 .then(r => r.json())
                 .then(config => {
+                    window.originalLogSettings = {
+                        log_max_size_mb: config.log_max_size_mb || 1,
+                        log_backup_count: config.log_backup_count || 5
+                    };
+                    
                     const settingsContent = document.getElementById('settings-content');
                     settingsContent.innerHTML = '';
                     
@@ -1672,6 +1896,31 @@ HTML_TEMPLATE = '''
                         </div>
                     `;
                     settingsContent.appendChild(perfGroup);
+                    
+                    // Log settings section
+                    const logGroup = document.createElement('div');
+                    logGroup.className = 'settings-group';
+                    logGroup.innerHTML = '<h3>Log Settings</h3>' +
+                        '<div class="form-row">' +
+                            '<label>Log File Size Limit (MB):</label>' +
+                            '<input type="number" id="log-max-size-mb" value="' + (config.log_max_size_mb || 1) + '" min="1" max="100" ' +
+                                   'style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;">' +
+                            '<div style="font-size: 12px; color: #999; margin-top: 8px;">' +
+                                'Maximum size for each log file before rotation (1-100 MB). When exceeded, a new log file is created.' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="form-row">' +
+                            '<label>Number of Backup Log Files:</label>' +
+                            '<input type="number" id="log-backup-count" value="' + (config.log_backup_count || 5) + '" min="1" max="20"' +
+                                   ' style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;">' +
+                            '<div style="font-size: 12px; color: #999; margin-top: 8px;">' +
+                                'Number of old log files to keep (1-20). Total disk space = Size Limit × (Backup Count + 1).' +
+                            '</div>' +
+                        '</div>' +
+                        '<div style="font-size: 12px; color: #ccc; margin-top: 10px; padding: 10px; background: #2a2a2a; border-radius: 3px;">' +
+                            '<strong>Note:</strong> Log settings require an application restart to take effect. Current settings: ' + (config.log_max_size_mb || 1) + 'MB per file, ' + (config.log_backup_count || 5) + ' backup files.' +
+                        '</div>';
+                    settingsContent.appendChild(logGroup);
                     
                     // Download clients section
                     const clientsGroup = document.createElement('div');
@@ -1743,6 +1992,8 @@ HTML_TEMPLATE = '''
                 debrid_sync_limit: parseInt(document.getElementById('debrid-sync-limit').value) || 100,
                 performance_mode: document.getElementById('performance-mode').value,
                 auto_extract_archives: document.getElementById('auto-extract').checked,
+                log_max_size_mb: parseInt(document.getElementById('log-max-size-mb').value) || 1,
+                log_backup_count: parseInt(document.getElementById('log-backup-count').value) || 5,
                 download_clients: {}
             };
             

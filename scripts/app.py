@@ -85,7 +85,7 @@ class MagnetHandler(FileSystemEventHandler):
             self.process_magnet(file_path)
         except Exception as e:
             logging.error(f"Error in magnet processing wrapper: {e}")
-            # Only clean up on error - successful processing will be cleaned up by download completion
+            # Clean up on any unhandled exception
             self.processing_files.discard(file_path)
             self.downloading_files.discard(file_path)
             self.queued_for_download.pop(file_path, None)
@@ -101,7 +101,17 @@ class MagnetHandler(FileSystemEventHandler):
             # PHASE 1: Upload and cache to Real-Debrid (unlimited)
             results = self._upload_and_cache_magnet(file_path)
             if not results:
-                return  # Failed during upload/cache phase
+                # Failed during upload/cache phase (duplicate, error, etc.) - clean up tracking
+                logging.info(f"Upload/cache failed or duplicate detected, cleaning up: {os.path.basename(file_path)}")
+                self.processing_files.discard(file_path)
+                self.downloading_files.discard(file_path)
+                self.queued_for_download.pop(file_path, None)
+                self.download_progress.pop(file_path, None)
+                self.file_downloads.pop(file_path, None)
+                self.torrent_ids.pop(file_path, None)
+                self.ready_to_download.pop(file_path, None)
+                self.upload_timestamps.pop(file_path, None)
+                return
             
             # PHASE 2: Queue for download (handled by queue system)
             # The upload/cache phase queues the item automatically
@@ -128,7 +138,7 @@ class MagnetHandler(FileSystemEventHandler):
             if os.path.exists(completed_magnet_path):
                 logging.info(f"Magnet already processed, removing duplicate: {filename}")
                 os.remove(file_path)
-                return None
+                return None  # This will trigger cleanup in process_magnet
             
             logging.info(f"Reading content from file: {file_path}")
             
@@ -206,19 +216,27 @@ class MagnetHandler(FileSystemEventHandler):
             self.file_downloads[file_path] = []
             for i, (download_link, filename) in enumerate(results):
                 if download_link and filename:
-                    file_info = {'filename': filename, 'progress': 0, 'status': 'Queued'}
+                    file_info = {'filename': filename, 'progress': 0, 'status': 'Queued', 'size': 0, 'downloaded': 0}
                     self.file_downloads[file_path].append(file_info)
             
-            # Update progress with file count and queue for download
+            # Update progress with file count
             total_files = len(self.file_downloads[file_path])
-            self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files) - Queued for download', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
             
-            # Queue for download instead of downloading immediately
-            self.queued_for_download[file_path] = results
-            logging.info(f"Queued for download: {os.path.basename(file_path)} ({total_files} files)")
-            
-            # Try to start download if slots available
-            self._process_download_queue()
+            # Check if download slots are available - start immediately if possible
+            available_slots = self.max_workers - len(self.downloading_files)
+            if available_slots > 0:
+                # Start download immediately
+                self.downloading_files.add(file_path)
+                self.download_progress[file_path] = {'status': f'Starting download ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+                logging.info(f"Download slot available ({available_slots} slots free), starting immediate download: {os.path.basename(file_path)} ({total_files} files)")
+                
+                # Start the download in a separate thread
+                self.executor.submit(self._download_files_from_queue, file_path, results)
+            else:
+                # All slots busy - queue for later
+                self.queued_for_download[file_path] = results
+                self.download_progress[file_path] = {'status': f'Cached in Real-Debrid ({total_files} files) - Queued for download', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+                logging.info(f"All download slots busy ({self.max_workers}/{self.max_workers} in use), queued for download: {os.path.basename(file_path)} ({total_files} files)")
             
             return results
             
@@ -236,8 +254,16 @@ class MagnetHandler(FileSystemEventHandler):
         # Check how many download slots are available
         available_slots = self.max_workers - len(self.downloading_files)
         
-        if available_slots <= 0 or not self.queued_for_download:
+        if available_slots <= 0:
+            if self.queued_for_download:
+                logging.debug(f"No download slots available ({len(self.downloading_files)}/{self.max_workers} in use), {len(self.queued_for_download)} items queued")
             return
+            
+        if not self.queued_for_download:
+            logging.debug(f"No items in download queue, {available_slots} slots available")
+            return
+        
+        logging.info(f"Processing download queue: {available_slots} slots available, {len(self.queued_for_download)} items queued")
         
         # Get queued items sorted by upload timestamp (oldest first)
         queued_items = []
@@ -250,17 +276,26 @@ class MagnetHandler(FileSystemEventHandler):
         queued_items.sort(key=lambda x: x[0])
         
         # Start downloads for available slots
-        for i in range(min(available_slots, len(queued_items))):
+        items_to_start = min(available_slots, len(queued_items))
+        for i in range(items_to_start):
             timestamp, file_path, results = queued_items[i]
             
             # Move from queued to downloading
             self.queued_for_download.pop(file_path, None)
             self.downloading_files.add(file_path)
             
+            # Update status
+            total_files = len(self.file_downloads.get(file_path, []))
+            self.download_progress[file_path] = {'status': f'Starting download ({total_files} files)', 'progress': 50, 'cache_progress': 100, 'files_progress': 0}
+            
             # Start the download in a separate thread
             self.executor.submit(self._download_files_from_queue, file_path, results)
             
-            logging.info(f"Started download from queue: {os.path.basename(file_path)}")
+            logging.info(f"Started download from queue: {os.path.basename(file_path)} (position {i+1} of {items_to_start})")
+        
+        remaining_queued = len(self.queued_for_download)
+        if remaining_queued > 0:
+            logging.info(f"Download queue processed: started {items_to_start} downloads, {remaining_queued} items still queued")
     
     def _download_files_from_queue(self, file_path, results):
         """Download files for a queued item"""
@@ -762,6 +797,18 @@ class MagnetHandler(FileSystemEventHandler):
             
         return filename
     
+    def format_file_size(self, size_bytes):
+        """Format file size in human readable format"""
+        if size_bytes == 0:
+            return "0 B"
+        
+        size_names = ["B", "KB", "MB", "GB", "TB"]
+        import math
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {size_names[i]}"
+    
     def sanitize_filename(self, filename):
         """Legacy method - now just calls basic_sanitize_filename"""
         return self.basic_sanitize_filename(filename)
@@ -812,6 +859,18 @@ class MagnetHandler(FileSystemEventHandler):
                     filename = 'download.mkv'
                     logging.info(f"Using fallback filename: {filename}")
             
+            # SECURITY CHECK: Block executable files immediately
+            if self.is_executable_file(filename):
+                logging.error(f"SECURITY: Blocked download of executable file: {filename}")
+                # Mark file as failed in tracking
+                with self.progress_lock:
+                    if file_index is not None and file_path and file_path in self.file_downloads:
+                        if file_index < len(self.file_downloads[file_path]):
+                            self.file_downloads[file_path][file_index]['progress'] = 100
+                            self.file_downloads[file_path][file_index]['status'] = 'BLOCKED - Executable'
+                            self.file_downloads[file_path][file_index]['downloaded'] = 0
+                return
+            
             # Only do basic filename sanitization (remove dangerous characters, limit length)
             original_filename = filename
             filename = self.basic_sanitize_filename(filename)
@@ -828,6 +887,13 @@ class MagnetHandler(FileSystemEventHandler):
             logging.info(f"Downloading to temporary location: {temp_path}")
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
+            
+            # Update file size information in tracking
+            if file_path and file_index is not None and file_path in self.file_downloads:
+                with self.progress_lock:
+                    if file_index < len(self.file_downloads[file_path]):
+                        self.file_downloads[file_path][file_index]['size'] = total_size
+                        self.file_downloads[file_path][file_index]['downloaded'] = 0
             
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=self.chunk_size):
@@ -849,6 +915,7 @@ class MagnetHandler(FileSystemEventHandler):
                                     if file_index < len(self.file_downloads[file_path]):
                                         self.file_downloads[file_path][file_index]['progress'] = int(progress)
                                         self.file_downloads[file_path][file_index]['status'] = 'Downloading'
+                                        self.file_downloads[file_path][file_index]['downloaded'] = downloaded
                                 
                                 # Update overall files progress (percentage of files completed)
                                 if file_path in self.file_downloads:
@@ -858,6 +925,17 @@ class MagnetHandler(FileSystemEventHandler):
                                     self.download_progress[file_path] = {'status': f'Downloading files ({completed_files}/{total_files} complete)', 'progress': 50 + int(files_progress * 0.5), 'cache_progress': 100, 'files_progress': int(files_progress)}
                         if downloaded % (1024*1024*10) == 0:  # Log every 10MB
                             logging.debug(f"Download progress: {progress:.1f}%")
+            
+            # SECURITY CHECK: Validate downloaded file is not executable
+            if self.validate_and_remove_executable(temp_path, filename):
+                # File was executable and removed
+                with self.progress_lock:
+                    if file_index is not None and file_path and file_path in self.file_downloads:
+                        if file_index < len(self.file_downloads[file_path]):
+                            self.file_downloads[file_path][file_index]['progress'] = 100
+                            self.file_downloads[file_path][file_index]['status'] = 'REMOVED - Executable'
+                            self.file_downloads[file_path][file_index]['downloaded'] = 0
+                return
             
             # Ensure file is fully written before moving
             time.sleep(2)
@@ -885,6 +963,7 @@ class MagnetHandler(FileSystemEventHandler):
                                     if file_index < len(self.file_downloads[file_path]):
                                         self.file_downloads[file_path][file_index]['progress'] = 100
                                         self.file_downloads[file_path][file_index]['status'] = 'Extracted'
+                                        self.file_downloads[file_path][file_index]['downloaded'] = self.file_downloads[file_path][file_index].get('size', 0)
                             return  # Don't move the original file since we extracted it
                         except Exception as e:
                             logging.warning(f"Failed to remove original archive: {e}")
@@ -900,6 +979,7 @@ class MagnetHandler(FileSystemEventHandler):
                                     if file_index < len(self.file_downloads[file_path]):
                                         self.file_downloads[file_path][file_index]['progress'] = 100
                                         self.file_downloads[file_path][file_index]['status'] = 'Failed Extraction'
+                                        self.file_downloads[file_path][file_index]['downloaded'] = self.file_downloads[file_path][file_index].get('size', 0)
                             return
                         except Exception as e:
                             logging.error(f"Failed to move failed archive: {e}")
@@ -916,12 +996,24 @@ class MagnetHandler(FileSystemEventHandler):
                     os.rename(temp_path, final_path)
                     logging.info(f"Download completed successfully: {final_path}")
                     
+                    # FINAL SECURITY CHECK: Validate moved file is not executable
+                    if self.validate_and_remove_executable(final_path, filename):
+                        # File was executable and removed from completed folder
+                        with self.progress_lock:
+                            if file_index is not None and file_path and file_path in self.file_downloads:
+                                if file_index < len(self.file_downloads[file_path]):
+                                    self.file_downloads[file_path][file_index]['progress'] = 100
+                                    self.file_downloads[file_path][file_index]['status'] = 'REMOVED - Executable'
+                                    self.file_downloads[file_path][file_index]['downloaded'] = 0
+                        return
+                    
                     # Mark file as completed (thread-safe)
                     with self.progress_lock:
                         if file_index is not None and file_path and file_path in self.file_downloads:
                             if file_index < len(self.file_downloads[file_path]):
                                 self.file_downloads[file_path][file_index]['progress'] = 100
                                 self.file_downloads[file_path][file_index]['status'] = 'Completed'
+                                self.file_downloads[file_path][file_index]['downloaded'] = self.file_downloads[file_path][file_index].get('size', 0)
                     break
                 except (OSError, IOError) as e:
                     if attempt < 4:
@@ -951,6 +1043,53 @@ class MagnetHandler(FileSystemEventHandler):
         else:
             logging.warning(f"Torrent deletion response: {response.status_code}")
     
+    def is_executable_file(self, filename):
+        """Check if file is an executable that should never be downloaded"""
+        if not filename:
+            return False
+        
+        filename_lower = filename.lower()
+        executable_extensions = ['.exe', '.bat', '.cmd', '.scr', '.com', '.pif', '.msi', '.dll']
+        
+        return any(filename_lower.endswith(ext) for ext in executable_extensions)
+    
+    def validate_and_remove_executable(self, file_path, filename):
+        """Validate file is not executable and remove if it is"""
+        if self.is_executable_file(filename):
+            logging.error(f"SECURITY: Executable file detected and blocked: {filename}")
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logging.info(f"SECURITY: Removed executable file: {file_path}")
+                return True  # File was executable and removed
+            except Exception as e:
+                logging.error(f"SECURITY: Failed to remove executable file {file_path}: {e}")
+                return True  # Still consider it handled to prevent further processing
+        return False  # File is safe to process
+    
+    def scan_and_remove_executables(self):
+        """Periodic scan to remove any executable files from completed folder"""
+        try:
+            if not os.path.exists(self.completed_folder):
+                return
+            
+            removed_count = 0
+            for filename in os.listdir(self.completed_folder):
+                file_path = os.path.join(self.completed_folder, filename)
+                if os.path.isfile(file_path) and self.is_executable_file(filename):
+                    try:
+                        os.remove(file_path)
+                        logging.error(f"SECURITY: Periodic scan removed executable file: {file_path}")
+                        removed_count += 1
+                    except Exception as e:
+                        logging.error(f"SECURITY: Failed to remove executable file during scan {file_path}: {e}")
+            
+            if removed_count > 0:
+                logging.info(f"SECURITY: Periodic scan removed {removed_count} executable files")
+                
+        except Exception as e:
+            logging.error(f"Error during executable file scan: {e}")
+    
     def is_archive_file(self, file_path):
         """Check if file is a supported archive format"""
         archive_extensions = {
@@ -973,7 +1112,7 @@ class MagnetHandler(FileSystemEventHandler):
             
             # Check for suspicious executable content in what should be media archives
             filename = os.path.basename(archive_path).lower()
-            if any(suspicious in filename for suspicious in ['.exe', '.bat', '.cmd', '.scr', '.com']):
+            if any(suspicious in filename for suspicious in ['.exe', '.bat', '.cmd', '.scr', '.com', '.pif', '.msi', '.dll']):
                 logging.warning(f"Archive contains suspicious executable reference: {archive_path}")
                 return False
             
@@ -1629,8 +1768,27 @@ def main(shutdown_event=None):
     with open(log_file, 'a') as f:
         f.write(f"\n\n=== APP STARTING {time.time()} ===\n")
     
-    # Setup rotating log handler (100KB max, 3 backup files)
-    log_handler = RotatingFileHandler(log_file, maxBytes=100*1024, backupCount=3)
+    config_path = os.path.join(base_dir, 'config.yaml')
+    
+    # Load log settings from config
+    log_max_size_mb = 1  # Default 1MB
+    log_backup_count = 5  # Default 5 backup files
+    
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f) or {}
+            log_max_size_mb = config.get('log_max_size_mb', 1)
+            log_backup_count = config.get('log_backup_count', 5)
+    except Exception as e:
+        print(f"Warning: Could not load log settings from config: {e}")
+    
+    # Setup rotating log handler with configurable size
+    log_handler = RotatingFileHandler(
+        log_file, 
+        maxBytes=log_max_size_mb * 1024 * 1024,  # Convert MB to bytes
+        backupCount=log_backup_count
+    )
     log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     
     logging.basicConfig(
@@ -1712,6 +1870,8 @@ def main(shutdown_event=None):
             # Retry processing any remaining magnet files for all clients
             for client_name, handler, magnets_folder in handlers:
                 process_existing_magnets(magnets_folder, handler)
+                # Periodic security scan for executable files
+                handler.scan_and_remove_executables()
     except KeyboardInterrupt:
         logging.info("Shutting down...")
     except Exception as e:
