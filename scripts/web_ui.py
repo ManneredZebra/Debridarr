@@ -51,7 +51,7 @@ class WebUI:
                 queued = []
                 
                 # Active downloads (uploading/caching or downloading)
-                for file_path in handler.processing_files:
+                for file_path in list(handler.processing_files):
                     filename = os.path.basename(file_path)
                     progress_info = handler.download_progress.get(file_path, {'status': 'Processing', 'progress': 0, 'cache_progress': 0, 'download_progress': 0})
                     file_downloads = handler.file_downloads.get(file_path, [])
@@ -122,40 +122,33 @@ class WebUI:
                 end_idx = total_lines - ((page - 1) * lines_per_page)
                 page_lines = all_lines[start_idx:end_idx]
                 
-                # Process lines for color coding
+                # Process lines for color coding, using the record's level field ("... - ERROR - ...")
+                # rather than words in the message - an INFO line mentioning "failed" isn't an error.
+                # Lines without a level (e.g. traceback lines) take the level of the entry they belong to.
+                import re
+                level_colors = {
+                    'error': '#ff6b6b',
+                    'warning': '#ffd93d',
+                    'info': '#6bcf7f',
+                    'debug': '#74c0fc',
+                    'default': '#ffffff'
+                }
+                level_pattern = re.compile(r' - (CRITICAL|ERROR|WARNING|INFO|DEBUG) - ')
                 processed_lines = []
+                current_level = 'default'
                 for line in page_lines:
-                    line_lower = line.lower()
-                    if 'error' in line_lower or 'failed' in line_lower:
-                        processed_lines.append({
-                            'text': line,
-                            'level': 'error',
-                            'color': '#ff6b6b'
-                        })
-                    elif 'warning' in line_lower or 'warn' in line_lower:
-                        processed_lines.append({
-                            'text': line,
-                            'level': 'warning', 
-                            'color': '#ffd93d'
-                        })
-                    elif 'info' in line_lower:
-                        processed_lines.append({
-                            'text': line,
-                            'level': 'info',
-                            'color': '#6bcf7f'
-                        })
-                    elif 'debug' in line_lower:
-                        processed_lines.append({
-                            'text': line,
-                            'level': 'debug',
-                            'color': '#74c0fc'
-                        })
-                    else:
-                        processed_lines.append({
-                            'text': line,
-                            'level': 'default',
-                            'color': '#ffffff'
-                        })
+                    match = level_pattern.search(line)
+                    if match:
+                        current_level = match.group(1).lower()
+                        if current_level == 'critical':
+                            current_level = 'error'
+                    elif line.startswith('==='):
+                        current_level = 'default'
+                    processed_lines.append({
+                        'text': line,
+                        'level': current_level,
+                        'color': level_colors[current_level]
+                    })
                 
                 return jsonify({
                     'logs': processed_lines,
@@ -184,30 +177,57 @@ class WebUI:
             except:
                 return jsonify({'issues': issues})
             
-            # Check API reachability
-            api_token = config.get('real_debrid_api_token', '')
-            if api_token and api_token != 'YOUR_API_TOKEN_HERE':
-                try:
-                    response = requests.get(
-                        'https://api.real-debrid.com/rest/1.0/user',
-                        headers={'Authorization': f'Bearer {api_token}'},
-                        timeout=5
-                    )
-                    if response.status_code == 401:
+            provider = config.get('debrid_provider', 'real_debrid')
+            
+            # Check API reachability based on provider
+            if provider == 'torbox':
+                api_token = config.get('torbox_api_token', '')
+                if api_token and api_token != 'YOUR_TORBOX_API_KEY_HERE':
+                    try:
+                        response = requests.get(
+                            'https://api.torbox.app/v1/api/user/me',
+                            headers={'Authorization': f'Bearer {api_token}'},
+                            timeout=5
+                        )
+                        if response.status_code == 401:
+                            issues.append({
+                                'message': 'TorBox API authentication failed',
+                                'solution': 'Update your TorBox API key in Settings'
+                            })
+                        elif response.status_code != 200:
+                            issues.append({
+                                'message': 'Cannot reach TorBox API',
+                                'solution': 'Check your internet connection and verify TorBox service is online'
+                            })
+                    except requests.RequestException:
                         issues.append({
-                            'message': 'Real-Debrid API authentication failed',
-                            'solution': 'Update your API token in Settings tab with a valid token from https://real-debrid.com/apitoken'
+                            'message': 'Network error connecting to TorBox',
+                            'solution': 'Check your internet connection and firewall settings'
                         })
-                    elif response.status_code != 200:
+            else:
+                api_token = config.get('real_debrid_api_token', '')
+                if api_token and api_token != 'YOUR_API_TOKEN_HERE':
+                    try:
+                        response = requests.get(
+                            'https://api.real-debrid.com/rest/1.0/user',
+                            headers={'Authorization': f'Bearer {api_token}'},
+                            timeout=5
+                        )
+                        if response.status_code == 401:
+                            issues.append({
+                                'message': 'Real-Debrid API authentication failed',
+                                'solution': 'Update your API token in Settings tab with a valid token from https://real-debrid.com/apitoken'
+                            })
+                        elif response.status_code != 200:
+                            issues.append({
+                                'message': 'Cannot reach Real-Debrid API',
+                                'solution': 'Check your internet connection and verify Real-Debrid service is online'
+                            })
+                    except requests.RequestException:
                         issues.append({
-                            'message': 'Cannot reach Real-Debrid API',
-                            'solution': 'Check your internet connection and verify Real-Debrid service is online'
+                            'message': 'Network error connecting to Real-Debrid',
+                            'solution': 'Check your internet connection and firewall settings'
                         })
-                except requests.RequestException:
-                    issues.append({
-                        'message': 'Network error connecting to Real-Debrid',
-                        'solution': 'Check your internet connection and firewall settings'
-                    })
             
             # Check directories are valid and reachable
             for client_name, client_config in config.get('download_clients', {}).items():
@@ -232,8 +252,8 @@ class WebUI:
             for name, handler, _ in self.handlers:
                 if name == client_name:
                     file_path = None
-                    for processing_file in handler.processing_files:
-                        if filename in processing_file:
+                    for processing_file in list(handler.processing_files):
+                        if os.path.basename(processing_file) == filename:
                             file_path = processing_file
                             break
                     if file_path:
@@ -448,7 +468,7 @@ class WebUI:
                 
                 # Collect all actively downloading filenames
                 active_files = set()
-                for file_path, files_list in handler.file_downloads.items():
+                for file_path, files_list in list(handler.file_downloads.items()):
                     for file_info in files_list:
                         # Extract just the filename from the path
                         filename = file_info['filename'].split('/')[-1].split('\\')[-1]
@@ -461,7 +481,7 @@ class WebUI:
                 if os.path.exists(magnets_folder):
                     for filename in os.listdir(magnets_folder):
                         file_path = os.path.join(magnets_folder, filename)
-                        if file_path not in handler.processing_files:
+                        if not handler.is_busy(file_path):
                             try:
                                 if os.path.isfile(file_path):
                                     os.remove(file_path)
@@ -493,12 +513,17 @@ class WebUI:
             try:
                 with open(self.config_path, 'r') as f:
                     config = yaml.safe_load(f) or {}
-                # Mask API token for display
+                # Mask API tokens for display
                 if 'real_debrid_api_token' in config:
                     token = config['real_debrid_api_token']
                     config['real_debrid_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
+                if 'torbox_api_token' in config:
+                    token = config['torbox_api_token']
+                    config['torbox_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
                 
-                # Ensure log settings exist with defaults
+                # Ensure defaults
+                if 'debrid_provider' not in config:
+                    config['debrid_provider'] = 'real_debrid'
                 if 'log_max_size_mb' not in config:
                     config['log_max_size_mb'] = 1
                 if 'log_backup_count' not in config:
@@ -555,14 +580,19 @@ class WebUI:
         def save_config():
             try:
                 new_config = request.json
-                # Read existing config to preserve full API token if masked
+                # Read existing config to preserve full API tokens if masked
                 with open(self.config_path, 'r') as f:
                     existing_config = yaml.safe_load(f)
                 
-                # If API token ends with '...' or contains '...', keep the existing one
+                # Preserve existing RD token if masked
                 if 'real_debrid_api_token' in new_config:
                     if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
+                
+                # Preserve existing TorBox token if masked
+                if 'torbox_api_token' in new_config:
+                    if '...' in new_config['torbox_api_token']:
+                        new_config['torbox_api_token'] = existing_config.get('torbox_api_token', '')
                 
                 # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in new_config:
@@ -612,6 +642,71 @@ class WebUI:
                 return jsonify({'success': True, 'message': 'Configuration saved successfully.', 'recheck': True})
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e), 'recheck': False})
+        
+        @self.app.route('/api/test-arr-connection', methods=['POST'])
+        def test_arr_connection():
+            try:
+                data = request.json
+                app_type = data.get('app_type')  # 'sonarr' or 'radarr'
+                base_url = data.get('base_url', '').strip()
+                api_key = data.get('api_key', '').strip()
+                
+                if not all([app_type, base_url, api_key]):
+                    return jsonify({'success': False, 'message': 'Missing required fields'})
+                
+                # Ensure base_url ends with /
+                if not base_url.endswith('/'):
+                    base_url += '/'
+                
+                # Construct health endpoint URL
+                health_url = f"{base_url}api/v3/health"
+                
+                # Make request with API key
+                headers = {
+                    'X-Api-Key': api_key,
+                    'Content-Type': 'application/json'
+                }
+                
+                response = requests.get(health_url, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    # Try to parse JSON to ensure it's a valid response
+                    try:
+                        health_data = response.json()
+                        return jsonify({
+                            'success': True, 
+                            'message': f'{app_type.title()} connection successful!',
+                            'status_code': response.status_code
+                        })
+                    except:
+                        return jsonify({
+                            'success': False, 
+                            'message': f'Connected to {app_type.title()} but received invalid response format'
+                        })
+                elif response.status_code == 401:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Authentication failed - check your {app_type.title()} API key'
+                    })
+                elif response.status_code == 404:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Health endpoint not found - check your {app_type.title()} URL and version (requires v3 API)'
+                    })
+                else:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'{app_type.title()} returned status {response.status_code}: {response.text[:100]}'
+                    })
+                    
+            except requests.exceptions.ConnectTimeout:
+                return jsonify({'success': False, 'message': 'Connection timeout - check URL and network'})
+            except requests.exceptions.ConnectionError:
+                return jsonify({'success': False, 'message': 'Connection failed - check URL and ensure service is running'})
+            except requests.exceptions.RequestException as e:
+                return jsonify({'success': False, 'message': f'Request failed: {str(e)}'})
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'Test failed: {str(e)}'})
         
         @self.app.route('/api/debrid-downloads/sync', methods=['POST'])
         def sync_debrid_downloads():
@@ -668,12 +763,17 @@ class WebUI:
         @self.app.route('/api/manual-magnet', methods=['POST'])
         def submit_manual_magnet():
             try:
+                import re
                 data = request.json
                 client_name = data.get('client_name', '')
                 magnet_link = data.get('magnet_link', '').strip()
                 
                 if not client_name or not magnet_link:
                     return jsonify({'success': False, 'message': 'Client name and magnet link required'})
+                
+                # Auto-prefix bare info hashes (40-char SHA1 or 64-char SHA256)
+                if re.match(r'^[a-fA-F0-9]{40}$', magnet_link) or re.match(r'^[a-fA-F0-9]{64}$', magnet_link):
+                    magnet_link = 'magnet:?xt=urn:btih:' + magnet_link
                 
                 if not magnet_link.startswith('magnet:'):
                     return jsonify({'success': False, 'message': 'Invalid magnet link format'})
@@ -1133,7 +1233,7 @@ HTML_TEMPLATE = '''
                                     <div><span style="color: ${download.phase === 'Downloading' ? '#007acc' : '#28a745'};">📁 ${download.phase}</span> - ${download.status}</div>
                                     <div class="progress-container">
                                         <div style="flex: 1;">
-                                            <div class="progress-label">Real-Debrid Cache</div>
+                                            <div class="progress-label">Debrid Cache</div>
                                             <div class="progress-bar cache-progress">
                                                 <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
                                                 <div class="progress-text">${download.cache_progress}%</div>
@@ -1234,7 +1334,7 @@ HTML_TEMPLATE = '''
                                     <div><span style="color: #ffc107;">⏳ Position ${index + 1} in queue</span> - ${download.status}</div>
                                     <div class="progress-container">
                                         <div style="flex: 1;">
-                                            <div class="progress-label">Real-Debrid Cache</div>
+                                            <div class="progress-label">Debrid Cache</div>
                                             <div class="progress-bar cache-progress">
                                                 <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
                                                 <div class="progress-text">${download.cache_progress}%</div>
@@ -1726,8 +1826,8 @@ HTML_TEMPLATE = '''
                         clientDiv.innerHTML = `
                             <h3 style="margin: 0 0 15px 0; color: #fff;">${client.toUpperCase()}</h3>
                             <div style="margin-bottom: 10px;">
-                                <label style="display: block; margin-bottom: 5px; color: #ccc; font-size: 14px;">Magnet Link:</label>
-                                <textarea id="manual-magnet-${client}" placeholder="Paste your magnet link here..." 
+                                <label style="display: block; margin-bottom: 5px; color: #ccc; font-size: 14px;">Magnet Link or Info Hash:</label>
+                                <textarea id="manual-magnet-${client}" placeholder="Paste a magnet link or info hash (40 or 64 hex characters)..." 
                                          style="width: 100%; height: 80px; padding: 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; font-size: 14px; resize: vertical; box-sizing: border-box;"></textarea>
                             </div>
                             <div style="display: flex; gap: 10px; align-items: center;">
@@ -1759,19 +1859,24 @@ HTML_TEMPLATE = '''
         function submitManualMagnetFromTab(client) {
             const textarea = document.getElementById(`manual-magnet-${client}`);
             const statusDiv = document.getElementById(`manual-status-${client}`);
-            const magnetLink = textarea.value.trim();
+            let magnetLink = textarea.value.trim();
             
             // Clear previous status
             statusDiv.textContent = '';
             
             if (!magnetLink) {
-                statusDiv.textContent = 'Please enter a magnet link';
+                statusDiv.textContent = 'Please enter a magnet link or hash';
                 statusDiv.style.color = '#dc3545';
                 return;
             }
             
+            // Auto-prefix bare hashes (40-char hex for SHA1 or 64-char hex for SHA256)
+            if (/^[a-fA-F0-9]{40}$/.test(magnetLink) || /^[a-fA-F0-9]{64}$/.test(magnetLink)) {
+                magnetLink = 'magnet:?xt=urn:btih:' + magnetLink;
+            }
+            
             if (!magnetLink.startsWith('magnet:')) {
-                statusDiv.textContent = 'Invalid magnet link format';
+                statusDiv.textContent = 'Invalid format — paste a magnet link or a 40/64-character info hash';
                 statusDiv.style.color = '#dc3545';
                 return;
             }
@@ -1835,10 +1940,23 @@ HTML_TEMPLATE = '''
                     const apiGroup = document.createElement('div');
                     apiGroup.className = 'settings-group';
                     apiGroup.innerHTML = `
-                        <h3>Real-Debrid API Token</h3>
+                        <h3>Debrid Provider</h3>
                         <div class="form-row">
-                            <label>API Token:</label>
+                            <label>Provider:</label>
+                            <select id="debrid-provider" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;" onchange="toggleDebridProvider()">
+                                <option value="real_debrid" ${(config.debrid_provider || 'real_debrid') === 'real_debrid' ? 'selected' : ''}>Real-Debrid</option>
+                                <option value="torbox" ${config.debrid_provider === 'torbox' ? 'selected' : ''}>TorBox</option>
+                            </select>
+                        </div>
+                        <div id="rd-token-group" class="form-row" style="${config.debrid_provider === 'torbox' ? 'display:none' : ''}">
+                            <label>Real-Debrid API Token:</label>
                             <input type="password" id="api-token" value="${config.real_debrid_api_token || ''}">
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">Get your token from <a href="https://real-debrid.com/apitoken" target="_blank" style="color: #007acc;">real-debrid.com/apitoken</a></div>
+                        </div>
+                        <div id="torbox-token-group" class="form-row" style="${config.debrid_provider === 'torbox' ? '' : 'display:none'}">
+                            <label>TorBox API Key:</label>
+                            <input type="password" id="torbox-api-token" value="${config.torbox_api_token || ''}">
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">Get your API key from <a href="https://torbox.app/settings" target="_blank" style="color: #007acc;">torbox.app/settings</a></div>
                         </div>
                     `;
                     settingsContent.appendChild(apiGroup);
@@ -1960,6 +2078,37 @@ HTML_TEMPLATE = '''
                                 <label>Failed Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${clientConfig.failed_magnets_folder || ''}">
                             </div>
+                            ${(name.toLowerCase() !== 'sonarr' && name.toLowerCase() !== 'radarr') ? `
+                            <div class="form-row">
+                                <label>Audiobook Library Folder:</label>
+                                <input type="text" class="client-field" data-client="${name}" data-field="audiobook_library_folder" value="${clientConfig.audiobook_library_folder || ''}" placeholder="Optional - leave blank to disable">
+                            </div>
+                            <div style="font-size: 12px; color: #999; margin: -5px 0 10px 0;">
+                                When set, finished downloads are sorted into "Author - Title" folders (audio files only, using embedded tags) and moved here. Anything that can't be identified is left in Completed Downloads.
+                            </div>
+                            ` : ''}
+                            ${(name.toLowerCase() === 'sonarr' || name.toLowerCase() === 'radarr') ? `
+                            <div style="border-top: 1px solid #555; margin: 15px 0; padding-top: 15px;">
+                                <h5 style="margin: 0 0 10px 0; color: #007acc;">ARR Integration (Optional)</h5>
+                                <div class="form-row">
+                                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key:</label>
+                                    <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" value="${clientConfig.arr_api_key || ''}" placeholder="Enter API key to enable automatic failure reporting">
+                                </div>
+                                <div class="form-row">
+                                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL:</label>
+                                    <input type="text" class="client-field" data-client="${name}" data-field="arr_url" value="${clientConfig.arr_url || 'http://localhost:' + (name.toLowerCase() === 'sonarr' ? '8989' : '7878')}" placeholder="http://localhost:${name.toLowerCase() === 'sonarr' ? '8989' : '7878'}">
+                                </div>
+                                <div class="form-row">
+                                    <button onclick="testArrConnection('${name}')" style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px; margin-right: 10px;">
+                                        Test ${name.charAt(0).toUpperCase() + name.slice(1)} Connection
+                                    </button>
+                                    <span id="arr-test-result-${name}" style="font-size: 14px; margin-left: 10px;"></span>
+                                </div>
+                                <div style="font-size: 12px; color: #999; margin-top: 8px;">
+                                    When enabled, Debridarr will automatically mark failed magnets as failed in ${name.charAt(0).toUpperCase() + name.slice(1)} for errors like 404, infringing content, timeouts, and security issues.
+                                </div>
+                            </div>
+                            ` : ''}
                         `;
                         clientsDiv.appendChild(clientDiv);
                     });
@@ -1986,7 +2135,9 @@ HTML_TEMPLATE = '''
 
         function saveSettings() {
             const config = {
+                debrid_provider: document.getElementById('debrid-provider').value,
                 real_debrid_api_token: document.getElementById('api-token').value,
+                torbox_api_token: document.getElementById('torbox-api-token').value,
                 manual_downloads_folder: document.getElementById('manual-downloads-folder').value,
                 media_root_directory: document.getElementById('media-root-directory').value,
                 debrid_sync_limit: parseInt(document.getElementById('debrid-sync-limit').value) || 100,
@@ -2023,6 +2174,58 @@ HTML_TEMPLATE = '''
                     console.error('saveSettings error:', err);
                     alert('Failed to save settings');
                 });
+        }
+
+        function testArrConnection(clientName) {
+            const apiKeyField = document.querySelector(`[data-client="${clientName}"][data-field="arr_api_key"]`);
+            const urlField = document.querySelector(`[data-client="${clientName}"][data-field="arr_url"]`);
+            const resultSpan = document.getElementById(`arr-test-result-${clientName}`);
+            
+            if (!apiKeyField || !urlField || !resultSpan) {
+                alert('Error: Could not find connection fields');
+                return;
+            }
+            
+            const apiKey = apiKeyField.value.trim();
+            const baseUrl = urlField.value.trim();
+            
+            if (!apiKey || !baseUrl) {
+                resultSpan.innerHTML = '<span style="color: #ff6b6b;">Please enter both API key and URL</span>';
+                return;
+            }
+            
+            // Show testing status
+            resultSpan.innerHTML = '<span style="color: #ffd93d;">Testing connection...</span>';
+            
+            fetch('/api/test-arr-connection', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    app_type: clientName.toLowerCase(),
+                    base_url: baseUrl,
+                    api_key: apiKey
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    resultSpan.innerHTML = `<span style="color: #6bcf7f;">✓ ${data.message}</span>`;
+                } else {
+                    resultSpan.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.message}</span>`;
+                }
+            })
+            .catch(err => {
+                console.error('Test connection error:', err);
+                resultSpan.innerHTML = '<span style="color: #ff6b6b;">✗ Test failed - network error</span>';
+            });
+        }
+
+        function toggleDebridProvider() {
+            const provider = document.getElementById('debrid-provider').value;
+            document.getElementById('rd-token-group').style.display = provider === 'real_debrid' ? '' : 'none';
+            document.getElementById('torbox-token-group').style.display = provider === 'torbox' ? '' : 'none';
         }
 
         function addNewClient() {
@@ -2086,7 +2289,7 @@ HTML_TEMPLATE = '''
         
         
         function syncDebridDownloads() {
-            if (!confirm('Sync Real-Debrid download history? This will fetch all downloads from your Real-Debrid account.')) return;
+            if (!confirm('Sync debrid download history? This will fetch all downloads from your debrid account.')) return;
             
             fetch('/api/debrid-downloads/sync', {method: 'POST'})
                 .then(r => r.json())
@@ -2168,7 +2371,7 @@ HTML_TEMPLATE = '''
                             debridList.appendChild(item);
                         });
                     } else {
-                        debridList.innerHTML = '<div class="download-item">No downloads found. Click "Sync Debrid Downloads" to fetch from Real-Debrid.</div>';
+                        debridList.innerHTML = '<div class="download-item">No downloads found. Click "Sync Debrid Downloads" to fetch from your debrid account.</div>';
                     }
                     
                     // Pagination controls
