@@ -48,11 +48,26 @@ class WebUI:
             status = {}
             for client_name, handler, _ in self.handlers:
                 downloads = []
-                for file_path in handler.processing_files:
+                queued = []
+                
+                # Active downloads (uploading/caching or downloading)
+                for file_path in list(handler.processing_files):
                     filename = os.path.basename(file_path)
                     progress_info = handler.download_progress.get(file_path, {'status': 'Processing', 'progress': 0, 'cache_progress': 0, 'download_progress': 0})
                     file_downloads = handler.file_downloads.get(file_path, [])
-                    downloads.append({
+                    
+                    # Determine if this is uploading/caching or downloading
+                    is_downloading = file_path in handler.downloading_files
+                    is_queued = file_path in handler.queued_for_download
+                    
+                    if is_queued:
+                        phase = "Queued for Download"
+                    elif is_downloading:
+                        phase = "Downloading"
+                    else:
+                        phase = "Uploading/Caching"
+                    
+                    download_item = {
                         'filename': filename,
                         'filepath': file_path,
                         'status': progress_info['status'],
@@ -60,37 +75,97 @@ class WebUI:
                         'cache_progress': progress_info.get('cache_progress', 0),
                         'files_progress': progress_info.get('files_progress', 0),
                         'files': file_downloads,
-                        'queued': False
-                    })
-                for file_path in handler.queued_files:
-                    filename = os.path.basename(file_path)
-                    downloads.append({
-                        'filename': filename,
-                        'filepath': file_path,
-                        'status': 'Queued',
-                        'progress': 0,
-                        'cache_progress': 0,
-                        'files_progress': 0,
-                        'files': [],
-                        'queued': True
-                    })
+                        'queued': is_queued,
+                        'phase': phase,
+                        'timestamp': handler.upload_timestamps.get(file_path, 0)
+                    }
+                    
+                    if is_queued:
+                        queued.append(download_item)
+                    else:
+                        downloads.append(download_item)
+                
+                # Sort downloads by timestamp (oldest first)
+                downloads.sort(key=lambda x: x['timestamp'])
+                queued.sort(key=lambda x: x['timestamp'])
+                
                 status[client_name] = {
                     'active_downloads': len(handler.processing_files),
-                    'downloads': downloads
+                    'downloading_count': len(handler.downloading_files),
+                    'uploading_count': len(handler.processing_files) - len(handler.downloading_files) - len(handler.queued_for_download),
+                    'queued_count': len(handler.queued_for_download),
+                    'downloads': downloads,
+                    'queued': queued
                 }
             return jsonify(status)
             
         @self.app.route('/api/logs')
         def get_logs():
             try:
+                # Get pagination parameters
+                lines_per_page = int(request.args.get('lines', 100))  # Default 100 lines
+                page = int(request.args.get('page', 1))  # Page 1 is most recent
+                
                 base_dir = 'C:\\ProgramData\\Debridarr'
                 log_file = os.path.join(base_dir, 'logs', 'debridarr.log')
-                with open(log_file, 'r') as f:
+                
+                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                    lines = content.split('\n')[-100:]  # Last 100 lines
-                return jsonify({'logs': lines})
-            except:
-                return jsonify({'logs': ['No logs available']})
+                    all_lines = [line for line in content.split('\n') if line.strip()]
+                
+                # Calculate pagination
+                total_lines = len(all_lines)
+                total_pages = max(1, (total_lines + lines_per_page - 1) // lines_per_page)
+                
+                # Get lines for requested page (page 1 = most recent)
+                start_idx = max(0, total_lines - (page * lines_per_page))
+                end_idx = total_lines - ((page - 1) * lines_per_page)
+                page_lines = all_lines[start_idx:end_idx]
+                
+                # Process lines for color coding, using the record's level field ("... - ERROR - ...")
+                # rather than words in the message - an INFO line mentioning "failed" isn't an error.
+                # Lines without a level (e.g. traceback lines) take the level of the entry they belong to.
+                import re
+                level_colors = {
+                    'error': '#ff6b6b',
+                    'warning': '#ffd93d',
+                    'info': '#6bcf7f',
+                    'debug': '#74c0fc',
+                    'default': '#ffffff'
+                }
+                level_pattern = re.compile(r' - (CRITICAL|ERROR|WARNING|INFO|DEBUG) - ')
+                processed_lines = []
+                current_level = 'default'
+                for line in page_lines:
+                    match = level_pattern.search(line)
+                    if match:
+                        current_level = match.group(1).lower()
+                        if current_level == 'critical':
+                            current_level = 'error'
+                    elif line.startswith('==='):
+                        current_level = 'default'
+                    processed_lines.append({
+                        'text': line,
+                        'level': current_level,
+                        'color': level_colors[current_level]
+                    })
+                
+                return jsonify({
+                    'logs': processed_lines,
+                    'pagination': {
+                        'current_page': page,
+                        'total_pages': total_pages,
+                        'lines_per_page': lines_per_page,
+                        'total_lines': total_lines,
+                        'has_next': page < total_pages,
+                        'has_prev': page > 1
+                    }
+                })
+            except Exception as e:
+                return jsonify({
+                    'logs': [{'text': f'Error loading logs: {str(e)}', 'level': 'error', 'color': '#ff6b6b'}],
+                    'pagination': {'current_page': 1, 'total_pages': 1, 'lines_per_page': 100, 'total_lines': 0, 'has_next': False, 'has_prev': False}
+                })
                 
         @self.app.route('/api/health')
         def get_health():
@@ -102,30 +177,57 @@ class WebUI:
             except:
                 return jsonify({'issues': issues})
             
-            # Check API reachability
-            api_token = config.get('real_debrid_api_token', '')
-            if api_token and api_token != 'YOUR_API_TOKEN_HERE':
-                try:
-                    response = requests.get(
-                        'https://api.real-debrid.com/rest/1.0/user',
-                        headers={'Authorization': f'Bearer {api_token}'},
-                        timeout=5
-                    )
-                    if response.status_code == 401:
+            provider = config.get('debrid_provider', 'real_debrid')
+            
+            # Check API reachability based on provider
+            if provider == 'torbox':
+                api_token = config.get('torbox_api_token', '')
+                if api_token and api_token != 'YOUR_TORBOX_API_KEY_HERE':
+                    try:
+                        response = requests.get(
+                            'https://api.torbox.app/v1/api/user/me',
+                            headers={'Authorization': f'Bearer {api_token}'},
+                            timeout=5
+                        )
+                        if response.status_code == 401:
+                            issues.append({
+                                'message': 'TorBox API authentication failed',
+                                'solution': 'Update your TorBox API key in Settings'
+                            })
+                        elif response.status_code != 200:
+                            issues.append({
+                                'message': 'Cannot reach TorBox API',
+                                'solution': 'Check your internet connection and verify TorBox service is online'
+                            })
+                    except requests.RequestException:
                         issues.append({
-                            'message': 'Real-Debrid API authentication failed',
-                            'solution': 'Update your API token in Settings tab with a valid token from https://real-debrid.com/apitoken'
+                            'message': 'Network error connecting to TorBox',
+                            'solution': 'Check your internet connection and firewall settings'
                         })
-                    elif response.status_code != 200:
+            else:
+                api_token = config.get('real_debrid_api_token', '')
+                if api_token and api_token != 'YOUR_API_TOKEN_HERE':
+                    try:
+                        response = requests.get(
+                            'https://api.real-debrid.com/rest/1.0/user',
+                            headers={'Authorization': f'Bearer {api_token}'},
+                            timeout=5
+                        )
+                        if response.status_code == 401:
+                            issues.append({
+                                'message': 'Real-Debrid API authentication failed',
+                                'solution': 'Update your API token in Settings tab with a valid token from https://real-debrid.com/apitoken'
+                            })
+                        elif response.status_code != 200:
+                            issues.append({
+                                'message': 'Cannot reach Real-Debrid API',
+                                'solution': 'Check your internet connection and verify Real-Debrid service is online'
+                            })
+                    except requests.RequestException:
                         issues.append({
-                            'message': 'Cannot reach Real-Debrid API',
-                            'solution': 'Check your internet connection and verify Real-Debrid service is online'
+                            'message': 'Network error connecting to Real-Debrid',
+                            'solution': 'Check your internet connection and firewall settings'
                         })
-                except requests.RequestException:
-                    issues.append({
-                        'message': 'Network error connecting to Real-Debrid',
-                        'solution': 'Check your internet connection and firewall settings'
-                    })
             
             # Check directories are valid and reachable
             for client_name, client_config in config.get('download_clients', {}).items():
@@ -150,28 +252,25 @@ class WebUI:
             for name, handler, _ in self.handlers:
                 if name == client_name:
                     file_path = None
-                    for processing_file in handler.processing_files:
-                        if filename in processing_file:
+                    for processing_file in list(handler.processing_files):
+                        if os.path.basename(processing_file) == filename:
                             file_path = processing_file
                             break
-                    if not file_path:
-                        for queued_file in handler.queued_files:
-                            if filename in queued_file:
-                                file_path = queued_file
-                                break
                     if file_path:
                         # Delete torrent from Real-Debrid if it exists
                         torrent_id = handler.torrent_ids.get(file_path)
                         if torrent_id:
                             handler.delete_torrent(torrent_id)
                         
-                        # Remove from tracking
+                        # Remove from all tracking
                         handler.processing_files.discard(file_path)
-                        if file_path in handler.queued_files:
-                            handler.queued_files.remove(file_path)
+                        handler.downloading_files.discard(file_path)
+                        handler.queued_for_download.pop(file_path, None)
                         handler.download_progress.pop(file_path, None)
                         handler.file_downloads.pop(file_path, None)
                         handler.torrent_ids.pop(file_path, None)
+                        handler.ready_to_download.pop(file_path, None)
+                        handler.upload_timestamps.pop(file_path, None)
                         
                         # Remove magnet file if it exists
                         try:
@@ -180,8 +279,8 @@ class WebUI:
                         except:
                             pass
                         
-                        # Process next queued item to free up slot
-                        handler._process_next_queued()
+                        # Try to start next queued download
+                        handler._process_download_queue()
                         
                         return jsonify({'success': True, 'message': f'Aborted {filename}'})
             return jsonify({'success': False, 'message': 'Download not found'})
@@ -369,7 +468,7 @@ class WebUI:
                 
                 # Collect all actively downloading filenames
                 active_files = set()
-                for file_path, files_list in handler.file_downloads.items():
+                for file_path, files_list in list(handler.file_downloads.items()):
                     for file_info in files_list:
                         # Extract just the filename from the path
                         filename = file_info['filename'].split('/')[-1].split('\\')[-1]
@@ -382,7 +481,7 @@ class WebUI:
                 if os.path.exists(magnets_folder):
                     for filename in os.listdir(magnets_folder):
                         file_path = os.path.join(magnets_folder, filename)
-                        if file_path not in handler.processing_files:
+                        if not handler.is_busy(file_path):
                             try:
                                 if os.path.isfile(file_path):
                                     os.remove(file_path)
@@ -413,12 +512,24 @@ class WebUI:
         def get_config():
             try:
                 with open(self.config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                # Mask API token for display
+                    config = yaml.safe_load(f) or {}
+                # Mask API tokens for display
                 if 'real_debrid_api_token' in config:
                     token = config['real_debrid_api_token']
                     config['real_debrid_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
-                # Ensure file_categories exists
+                if 'torbox_api_token' in config:
+                    token = config['torbox_api_token']
+                    config['torbox_api_token'] = token[:8] + '...' if len(token) > 8 else '***'
+                
+                # Ensure defaults
+                if 'debrid_provider' not in config:
+                    config['debrid_provider'] = 'real_debrid'
+                if 'log_max_size_mb' not in config:
+                    config['log_max_size_mb'] = 1
+                if 'log_backup_count' not in config:
+                    config['log_backup_count'] = 5
+                
+                # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in config:
                     config['file_categories'] = {
                         'video': ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.flv', '.webm', '.mpg', '.mpeg', '.ts'],
@@ -447,7 +558,7 @@ class WebUI:
                     
                     magnets_folder = os.path.expandvars(client_config['magnets_folder'])
                     if os.path.exists(magnets_folder):
-                        counts[client_name]['magnets'] = len([f for f in os.listdir(magnets_folder) if os.path.isfile(os.path.join(magnets_folder, f))])
+                        counts[client_name]['magnets'] = len([f for f in os.listdir(magnets_folder) if os.path.isfile(os.path.join(magnets_folder, f)) and (f.endswith('.magnet') or f.endswith('.torrent'))])
                     
                     in_progress_folder = os.path.expandvars(client_config['in_progress_folder'])
                     if os.path.exists(in_progress_folder):
@@ -469,16 +580,21 @@ class WebUI:
         def save_config():
             try:
                 new_config = request.json
-                # Read existing config to preserve full API token if masked
+                # Read existing config to preserve full API tokens if masked
                 with open(self.config_path, 'r') as f:
                     existing_config = yaml.safe_load(f)
                 
-                # If API token ends with '...' or contains '...', keep the existing one
+                # Preserve existing RD token if masked
                 if 'real_debrid_api_token' in new_config:
                     if '...' in new_config['real_debrid_api_token']:
                         new_config['real_debrid_api_token'] = existing_config.get('real_debrid_api_token', '')
                 
-                # Ensure file_categories exists
+                # Preserve existing TorBox token if masked
+                if 'torbox_api_token' in new_config:
+                    if '...' in new_config['torbox_api_token']:
+                        new_config['torbox_api_token'] = existing_config.get('torbox_api_token', '')
+                
+                # Ensure file_categories exists for backward compatibility but not used
                 if 'file_categories' not in new_config:
                     if 'file_categories' in existing_config:
                         new_config['file_categories'] = existing_config['file_categories']
@@ -489,6 +605,31 @@ class WebUI:
                             'audiobook': ['.m4b', '.mp3', '.m4a', '.aa', '.aax', '.flac'],
                             'ebook': ['.epub', '.mobi', '.azw', '.azw3', '.pdf', '.cbz', '.cbr']
                         }
+                
+                # Ensure auto_extract_archives has a default value
+                if 'auto_extract_archives' not in new_config:
+                    new_config['auto_extract_archives'] = True
+                
+                # Ensure log settings have defaults
+                if 'log_max_size_mb' not in new_config:
+                    new_config['log_max_size_mb'] = 1
+                if 'log_backup_count' not in new_config:
+                    new_config['log_backup_count'] = 5
+                
+                # Validate log settings
+                try:
+                    log_max_size = int(new_config['log_max_size_mb'])
+                    if log_max_size < 1 or log_max_size > 100:
+                        new_config['log_max_size_mb'] = 1
+                except:
+                    new_config['log_max_size_mb'] = 1
+                
+                try:
+                    log_backup_count = int(new_config['log_backup_count'])
+                    if log_backup_count < 1 or log_backup_count > 20:
+                        new_config['log_backup_count'] = 5
+                except:
+                    new_config['log_backup_count'] = 5
                 
                 # Write updated config
                 with open(self.config_path, 'w') as f:
@@ -501,6 +642,71 @@ class WebUI:
                 return jsonify({'success': True, 'message': 'Configuration saved successfully.', 'recheck': True})
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e), 'recheck': False})
+        
+        @self.app.route('/api/test-arr-connection', methods=['POST'])
+        def test_arr_connection():
+            try:
+                data = request.json
+                app_type = data.get('app_type')  # 'sonarr' or 'radarr'
+                base_url = data.get('base_url', '').strip()
+                api_key = data.get('api_key', '').strip()
+                
+                if not all([app_type, base_url, api_key]):
+                    return jsonify({'success': False, 'message': 'Missing required fields'})
+                
+                # Ensure base_url ends with /
+                if not base_url.endswith('/'):
+                    base_url += '/'
+                
+                # Construct health endpoint URL
+                health_url = f"{base_url}api/v3/health"
+                
+                # Make request with API key
+                headers = {
+                    'X-Api-Key': api_key,
+                    'Content-Type': 'application/json'
+                }
+                
+                response = requests.get(health_url, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    # Try to parse JSON to ensure it's a valid response
+                    try:
+                        health_data = response.json()
+                        return jsonify({
+                            'success': True, 
+                            'message': f'{app_type.title()} connection successful!',
+                            'status_code': response.status_code
+                        })
+                    except:
+                        return jsonify({
+                            'success': False, 
+                            'message': f'Connected to {app_type.title()} but received invalid response format'
+                        })
+                elif response.status_code == 401:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Authentication failed - check your {app_type.title()} API key'
+                    })
+                elif response.status_code == 404:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Health endpoint not found - check your {app_type.title()} URL and version (requires v3 API)'
+                    })
+                else:
+                    return jsonify({
+                        'success': False, 
+                        'message': f'{app_type.title()} returned status {response.status_code}: {response.text[:100]}'
+                    })
+                    
+            except requests.exceptions.ConnectTimeout:
+                return jsonify({'success': False, 'message': 'Connection timeout - check URL and network'})
+            except requests.exceptions.ConnectionError:
+                return jsonify({'success': False, 'message': 'Connection failed - check URL and ensure service is running'})
+            except requests.exceptions.RequestException as e:
+                return jsonify({'success': False, 'message': f'Request failed: {str(e)}'})
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'Test failed: {str(e)}'})
         
         @self.app.route('/api/debrid-downloads/sync', methods=['POST'])
         def sync_debrid_downloads():
@@ -550,42 +756,54 @@ class WebUI:
         
         @self.app.route('/api/queue/move/<client_name>/<direction>/<path:filename>')
         def move_queue(client_name, direction, filename):
-            for name, handler, _ in self.handlers:
-                if name == client_name:
-                    file_path = None
-                    for queued_file in handler.queued_files:
-                        if filename in queued_file:
-                            file_path = queued_file
-                            break
-                    if file_path:
-                        if handler.move_queue_item(file_path, direction):
-                            return jsonify({'success': True})
-                        return jsonify({'success': False, 'message': 'Cannot move in that direction'})
-            return jsonify({'success': False, 'message': 'Item not found in queue'})
+            # Queue movement no longer supported since uploads are unlimited
+            return jsonify({'success': False, 'message': 'Queue movement not supported - uploads are no longer queued'})
         
-        @self.app.route('/api/test-arr', methods=['POST'])
-        def test_arr_connection():
+
+        @self.app.route('/api/manual-magnet', methods=['POST'])
+        def submit_manual_magnet():
             try:
+                import re
                 data = request.json
-                arr_url = data.get('url', '').rstrip('/')
-                arr_api_key = data.get('api_key', '')
+                client_name = data.get('client_name', '')
+                magnet_link = data.get('magnet_link', '').strip()
                 
-                if not arr_url or not arr_api_key:
-                    return jsonify({'success': False, 'message': 'URL and API key required'})
+                if not client_name or not magnet_link:
+                    return jsonify({'success': False, 'message': 'Client name and magnet link required'})
                 
-                headers = {'X-Api-Key': arr_api_key}
-                response = requests.get(f'{arr_url}/api/v3/system/status', headers=headers, timeout=10)
+                # Auto-prefix bare info hashes (40-char SHA1 or 64-char SHA256)
+                if re.match(r'^[a-fA-F0-9]{40}$', magnet_link) or re.match(r'^[a-fA-F0-9]{64}$', magnet_link):
+                    magnet_link = 'magnet:?xt=urn:btih:' + magnet_link
                 
-                if response.status_code == 200:
-                    app_name = response.json().get('appName', 'Unknown')
-                    version = response.json().get('version', 'Unknown')
-                    return jsonify({'success': True, 'message': f'Connected to {app_name} v{version}'})
-                elif response.status_code == 401:
-                    return jsonify({'success': False, 'message': 'Invalid API key'})
-                else:
-                    return jsonify({'success': False, 'message': f'Connection failed: {response.status_code}'})
-            except requests.RequestException as e:
-                return jsonify({'success': False, 'message': f'Connection error: {str(e)}'})
+                if not magnet_link.startswith('magnet:'):
+                    return jsonify({'success': False, 'message': 'Invalid magnet link format'})
+                
+                # Find the handler for this client
+                handler = None
+                magnets_folder = None
+                for name, h, folder in self.handlers:
+                    if name == client_name:
+                        handler = h
+                        magnets_folder = folder
+                        break
+                
+                if not handler:
+                    return jsonify({'success': False, 'message': f'Client "{client_name}" not found'})
+                
+                # Generate a unique filename for the magnet
+                import hashlib
+                import time
+                magnet_hash = hashlib.md5(magnet_link.encode()).hexdigest()[:8]
+                timestamp = int(time.time())
+                filename = f"manual_{client_name}_{timestamp}_{magnet_hash}.magnet"
+                
+                # Write magnet file to the client's magnets folder
+                magnet_file_path = os.path.join(magnets_folder, filename)
+                with open(magnet_file_path, 'w') as f:
+                    f.write(magnet_link)
+                
+                return jsonify({'success': True, 'message': f'Magnet submitted successfully to {client_name}'})
+                
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)})
     
@@ -639,7 +857,11 @@ HTML_TEMPLATE = '''
         .cache-progress .progress-fill { background: #28a745; }
         .download-progress .progress-fill { background: #007acc; }
         .progress-label { font-size: 13px; color: #ccc; margin-bottom: 2px; }
-        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: monospace; font-size: 14px; }
+        .logs { background: #000; padding: 15px; border-radius: 5px; height: 400px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; border: 1px solid #333; }
+        .logs::-webkit-scrollbar { width: 8px; }
+        .logs::-webkit-scrollbar-track { background: #1a1a1a; }
+        .logs::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        .logs::-webkit-scrollbar-thumb:hover { background: #555; }
         .status-good { color: #28a745; font-size: 15px; }
         .status-active { color: #ffc107; font-size: 15px; }
         .settings-group { background: #2d2d2d; padding: 20px; margin: 15px 0; border-radius: 5px; }
@@ -666,6 +888,7 @@ HTML_TEMPLATE = '''
             </div>
             <div class="nav-item active" onclick="showSection('overview')">Overview</div>
             <div class="nav-item" onclick="showSection('downloads')">Active Downloads</div>
+            <div class="nav-item" onclick="showSection('manual-upload')">Manual Upload</div>
             <div class="nav-item" onclick="showSection('history')">History</div>
             <div class="nav-item" onclick="showSection('failed')">Failed Downloads</div>
             <div class="nav-item" onclick="showSection('debrid-downloads')">Debrid Downloads</div>
@@ -675,13 +898,25 @@ HTML_TEMPLATE = '''
         </div>
         <div class="content">
             <div id="overview" class="section active">
-                <h1>System Overview</h1>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h1 style="margin: 0;">System Overview</h1>
+                    <button onclick="resetClientOrder()" style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                        Reset Order
+                    </button>
+                </div>
                 <div id="system-warnings"></div>
                 <div id="status-cards"></div>
             </div>
             <div id="downloads" class="section">
                 <h1>Active Downloads <span id="download-badge" style="background: #007acc; padding: 3px 10px; border-radius: 12px; font-size: 14px; margin-left: 10px;">0</span></h1>
                 <div id="download-list"></div>
+            </div>
+            <div id="manual-upload" class="section">
+                <h1>Manual Upload</h1>
+                <div style="margin-bottom: 20px; color: #ccc;">
+                    Submit magnet links directly to your download clients. This page doesn't auto-refresh, so your text won't disappear.
+                </div>
+                <div id="manual-upload-clients"></div>
             </div>
             <div id="history" class="section">
                 <h1>Download History</h1>
@@ -739,8 +974,23 @@ HTML_TEMPLATE = '''
                 <div id="completed-list"></div>
             </div>
             <div id="logs" class="section">
-                <h1>System Logs</h1>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h1 style="margin: 0;">System Logs</h1>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <label style="color: #ccc; font-size: 14px;">Lines per page:</label>
+                        <select id="logs-per-page" style="padding: 5px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 3px; font-size: 14px;">
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="200">200</option>
+                            <option value="500">500</option>
+                        </select>
+                        <button onclick="loadLogs()" style="background: #007acc; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
                 <div id="log-content" class="logs"></div>
+                <div id="logs-pagination" style="margin-top: 15px; text-align: center; color: #ccc; font-size: 14px;"></div>
             </div>
             <div id="settings" class="section">
                 <h1>Settings</h1>
@@ -770,6 +1020,7 @@ HTML_TEMPLATE = '''
             if (section === 'debrid-downloads') loadDebridDownloads();
             if (section === 'completed') loadCompleted();
             if (section === 'settings') loadSettings();
+            if (section === 'manual-upload') loadManualUpload();
         }
 
         let healthCheckInterval = null;
@@ -807,6 +1058,14 @@ HTML_TEMPLATE = '''
                 .catch(err => console.error('loadHealth error:', err));
         }
         
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
         function loadStatus() {
             Promise.all([
                 fetch('/api/status').then(r => r.json()),
@@ -814,6 +1073,10 @@ HTML_TEMPLATE = '''
             ])
                 .then(([data, counts]) => {
                     console.log('Status data:', data);
+                    
+                    // Store data for use in moveClient function
+                    window.lastStatusData = data;
+                    
                     const statusCards = document.getElementById('status-cards');
                     const downloadList = document.getElementById('download-list');
                     
@@ -823,7 +1086,27 @@ HTML_TEMPLATE = '''
                     // Count total active downloads
                     let totalDownloads = 0;
                     
-                    Object.entries(data).forEach(([client, status]) => {
+                    // Get client order from config or use default alphabetical order
+                    const clientOrder = window.clientOrder || [];
+                    
+                    // Ensure all clients are in the order array (in case new clients were added)
+                    const allClients = Object.keys(data);
+                    const orderedClients = [...clientOrder.filter(c => allClients.includes(c))];
+                    allClients.forEach(client => {
+                        if (!orderedClients.includes(client)) {
+                            orderedClients.push(client);
+                        }
+                    });
+                    
+                    console.log('Client ordering:', {
+                        allClients,
+                        savedOrder: clientOrder,
+                        finalOrder: orderedClients
+                    });
+                    
+                    orderedClients.forEach((client, index) => {
+                        const status = data[client];
+                        if (!status) return;
                         totalDownloads += status.active_downloads;
                         
                         // Status card
@@ -833,14 +1116,25 @@ HTML_TEMPLATE = '''
                         const clientCounts = counts[client] || {magnets: 0, in_progress: 0, completed_downloads: 0};
                         
                         card.innerHTML = `
-                            <h3 style="margin-bottom: 15px;">${client.toUpperCase()}</h3>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <h3 style="margin: 0;">${client.toUpperCase()}</h3>
+                                <div style="color: #666; font-size: 12px;">Position ${index + 1}</div>
+                            </div>
                             <div style="display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap;">
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
-                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${status.active_downloads}</div>
-                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Active</div>
+                                    <div style="font-size: 24px; font-weight: bold; color: #28a745;">${status.uploading_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Uploading</div>
                                 </div>
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
-                                    <div style="font-size: 24px; font-weight: bold; color: #007acc;">${clientCounts.magnets}</div>
+                                    <div style="font-size: 24px; font-weight: bold; color: #007acc;">${status.downloading_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Downloading</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${status.queued_count || 0}</div>
+                                    <div style="font-size: 11px; color: #999; margin-top: 5px;">Queued</div>
+                                </div>
+                                <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #ffc107;">${clientCounts.magnets}</div>
                                     <div style="font-size: 11px; color: #999; margin-top: 5px;">Magnets</div>
                                 </div>
                                 <div style="flex: 1; min-width: 100px; background: #1a1a1a; padding: 12px; border-radius: 5px; text-align: center;">
@@ -857,6 +1151,32 @@ HTML_TEMPLATE = '''
                                 </div>
                             </div>
                         `;
+                        
+                        // Add reorder buttons container
+                        const reorderContainer = document.createElement('div');
+                        reorderContainer.style.cssText = 'display: flex; gap: 5px; margin: 10px 0; justify-content: flex-end;';
+                        
+                        // Up button
+                        if (index > 0) {
+                            const upBtn = document.createElement('button');
+                            upBtn.className = 'retry-btn';
+                            upBtn.textContent = '↑ Move Up';
+                            upBtn.style.cssText = 'background: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;';
+                            upBtn.onclick = function() { moveClient(client, 'up'); };
+                            reorderContainer.appendChild(upBtn);
+                        }
+                        
+                        // Down button
+                        if (index < orderedClients.length - 1) {
+                            const downBtn = document.createElement('button');
+                            downBtn.className = 'retry-btn';
+                            downBtn.textContent = '↓ Move Down';
+                            downBtn.style.cssText = 'background: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;';
+                            downBtn.onclick = function() { moveClient(client, 'down'); };
+                            reorderContainer.appendChild(downBtn);
+                        }
+                        
+                        card.appendChild(reorderContainer);
                         
                         if (status.active_downloads > 0) {
                             const viewBtn = document.createElement('button');
@@ -875,109 +1195,165 @@ HTML_TEMPLATE = '''
                         
                         statusCards.appendChild(card);
                         
-                        // Download items
-                        status.downloads.forEach(download => {
-                            const item = document.createElement('div');
-                            item.className = 'download-item';
+                        // Active downloads section
+                        if (status.downloads && status.downloads.length > 0) {
+                            // Add section header for active downloads
+                            const activeHeader = document.createElement('div');
+                            activeHeader.style.cssText = 'font-size: 18px; font-weight: bold; margin: 20px 0 10px 0; color: #007acc; border-bottom: 2px solid #007acc; padding-bottom: 5px;';
+                            activeHeader.textContent = `${client.toUpperCase()} - Active Downloads (${status.downloads.length})`;
+                            downloadList.appendChild(activeHeader);
                             
-                            if (download.queued) {
-                                item.style.opacity = '0.7';
-                                item.style.border = '1px dashed #666';
-                            }
-                            
-                            // Add buttons at top
-                            const btnContainer = document.createElement('div');
-                            btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
-                            
-                            if (download.queued) {
-                                const upBtn = document.createElement('button');
-                                upBtn.className = 'retry-btn';
-                                upBtn.textContent = '↑';
-                                upBtn.style.padding = '4px 10px';
-                                upBtn.onclick = function() { moveQueue(client, 'up', download.filename); };
-                                btnContainer.appendChild(upBtn);
+                            // Downloads are already sorted by timestamp (oldest first) from the API
+                            status.downloads.forEach(download => {
+                                const item = document.createElement('div');
+                                item.className = 'download-item';
                                 
-                                const downBtn = document.createElement('button');
-                                downBtn.className = 'retry-btn';
-                                downBtn.textContent = '↓';
-                                downBtn.style.padding = '4px 10px';
-                                downBtn.onclick = function() { moveQueue(client, 'down', download.filename); };
-                                btnContainer.appendChild(downBtn);
-                            }
-                            
-                            const abortBtn = document.createElement('button');
-                            abortBtn.className = 'abort-btn';
-                            abortBtn.textContent = download.queued ? 'Remove' : 'Abort';
-                            abortBtn.onclick = function() { abortDownload(client, download.filename); };
-                            btnContainer.appendChild(abortBtn);
-                            
-                            item.appendChild(btnContainer);
-                            
-                            const contentDiv = document.createElement('div');
-                            contentDiv.innerHTML = `
-                                <strong>${client.toUpperCase()}</strong>: ${download.filename}
-                                <div>${download.queued ? '<span style="color: #ffc107;">⏳ Queued</span>' : download.status}</div>
-                                ${!download.queued ? `
-                                <div class="progress-container">
-                                    <div style="flex: 1;">
-                                        <div class="progress-label">Real-Debrid Cache</div>
-                                        <div class="progress-bar cache-progress">
-                                            <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
-                                            <div class="progress-text">${download.cache_progress}%</div>
+                                // Add phase indicator styling
+                                if (download.phase === 'Downloading') {
+                                    item.style.borderLeft = '4px solid #007acc';
+                                } else {
+                                    item.style.borderLeft = '4px solid #28a745';
+                                }
+                                
+                                // Add buttons at top
+                                const btnContainer = document.createElement('div');
+                                btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
+                                
+                                const abortBtn = document.createElement('button');
+                                abortBtn.className = 'abort-btn';
+                                abortBtn.textContent = 'Abort';
+                                abortBtn.onclick = function() { abortDownload(client, download.filename); };
+                                btnContainer.appendChild(abortBtn);
+                                
+                                item.appendChild(btnContainer);
+                                
+                                const contentDiv = document.createElement('div');
+                                contentDiv.innerHTML = `
+                                    <strong>${client.toUpperCase()}</strong>: ${download.filename}
+                                    <div><span style="color: ${download.phase === 'Downloading' ? '#007acc' : '#28a745'};">📁 ${download.phase}</span> - ${download.status}</div>
+                                    <div class="progress-container">
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Debrid Cache</div>
+                                            <div class="progress-bar cache-progress">
+                                                <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
+                                                <div class="progress-text">${download.cache_progress}%</div>
+                                            </div>
+                                        </div>
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Files Complete</div>
+                                            <div class="progress-bar download-progress">
+                                                <div class="progress-fill" style="width: ${download.files_progress || 0}%"></div>
+                                                <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
+                                            </div>
                                         </div>
                                     </div>
-                                    <div style="flex: 1;">
-                                        <div class="progress-label">Files Complete</div>
-                                        <div class="progress-bar download-progress">
-                                            <div class="progress-fill" style="width: ${download.files_progress || 0}%"></div>
-                                            <div class="progress-text">${Math.round(download.files_progress || 0)}%</div>
+                                `;
+                                item.appendChild(contentDiv);
+                                
+                                // Add individual file progress bars if files exist
+                                if (download.files && download.files.length > 0) {
+                                    const filesDiv = document.createElement('div');
+                                    filesDiv.style.marginTop = '10px';
+                                    filesDiv.innerHTML = '<strong>Individual Files:</strong>';
+                                    
+                                    download.files.forEach(file => {
+                                        const fileDiv = document.createElement('div');
+                                        fileDiv.style.cssText = 'margin: 5px 0; padding: 5px; background: #333; border-radius: 3px;';
+                                        
+                                        const displayName = file.filename.split('/').pop().split(String.fromCharCode(92)).pop().replace(/^[a-f0-9]{32,}[._-]?/i, '');
+                                        
+                                        // Format file size
+                                        let sizeText = '';
+                                        if (file.size && file.size > 0) {
+                                            const size = formatFileSize(file.size);
+                                            const downloaded = formatFileSize(file.downloaded || 0);
+                                            sizeText = ` - ${downloaded} / ${size}`;
+                                        }
+                                        
+                                        const nameDiv = document.createElement('div');
+                                        nameDiv.style.cssText = 'font-size: 12px; margin-bottom: 3px;';
+                                        nameDiv.textContent = displayName + ' (' + file.status + ')' + sizeText;
+                                        
+                                        const progressDiv = document.createElement('div');
+                                        progressDiv.className = 'progress-bar download-progress';
+                                        progressDiv.style.cssText = 'height: 15px; margin: 0;';
+                                        
+                                        const fillDiv = document.createElement('div');
+                                        fillDiv.className = 'progress-fill';
+                                        fillDiv.style.width = file.progress + '%';
+                                        
+                                        const textDiv = document.createElement('div');
+                                        textDiv.className = 'progress-text';
+                                        textDiv.style.cssText = 'line-height: 15px; font-size: 10px;';
+                                        textDiv.textContent = file.progress + '%';
+                                        
+                                        progressDiv.appendChild(fillDiv);
+                                        progressDiv.appendChild(textDiv);
+                                        fileDiv.appendChild(nameDiv);
+                                        fileDiv.appendChild(progressDiv);
+                                        filesDiv.appendChild(fileDiv);
+                                    });
+                                    
+                                    contentDiv.appendChild(filesDiv);
+                                }
+                                
+                                downloadList.appendChild(item);
+                            });
+                        }
+                        
+                        // Queued downloads section
+                        if (status.queued && status.queued.length > 0) {
+                            // Add section header for queued downloads
+                            const queuedHeader = document.createElement('div');
+                            queuedHeader.style.cssText = 'font-size: 18px; font-weight: bold; margin: 30px 0 10px 0; color: #ffc107; border-bottom: 2px solid #ffc107; padding-bottom: 5px;';
+                            queuedHeader.textContent = `${client.toUpperCase()} - Download Queue (${status.queued.length})`;
+                            downloadList.appendChild(queuedHeader);
+                            
+                            // Queued items are already sorted by timestamp (oldest first) from the API
+                            status.queued.forEach((download, index) => {
+                                const item = document.createElement('div');
+                                item.className = 'download-item';
+                                item.style.borderLeft = '4px solid #ffc107';
+                                item.style.opacity = '0.8';  // Slightly faded to show it's queued
+                                
+                                // Add buttons at top
+                                const btnContainer = document.createElement('div');
+                                btnContainer.style.cssText = 'float: right; display: flex; gap: 5px;';
+                                
+                                const abortBtn = document.createElement('button');
+                                abortBtn.className = 'abort-btn';
+                                abortBtn.textContent = 'Abort';
+                                abortBtn.onclick = function() { abortDownload(client, download.filename); };
+                                btnContainer.appendChild(abortBtn);
+                                
+                                item.appendChild(btnContainer);
+                                
+                                const contentDiv = document.createElement('div');
+                                contentDiv.innerHTML = `
+                                    <strong>${client.toUpperCase()}</strong>: ${download.filename}
+                                    <div><span style="color: #ffc107;">⏳ Position ${index + 1} in queue</span> - ${download.status}</div>
+                                    <div class="progress-container">
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Debrid Cache</div>
+                                            <div class="progress-bar cache-progress">
+                                                <div class="progress-fill" style="width: ${download.cache_progress}%"></div>
+                                                <div class="progress-text">${download.cache_progress}%</div>
+                                            </div>
+                                        </div>
+                                        <div style="flex: 1;">
+                                            <div class="progress-label">Ready for Download</div>
+                                            <div class="progress-bar download-progress">
+                                                <div class="progress-fill" style="width: 100%; background: #ffc107;"></div>
+                                                <div class="progress-text">Queued</div>
+                                            </div>
                                         </div>
                                     </div>
-                                </div>` : ''}
-                            `;
-                            item.appendChild(contentDiv);
-                            
-                            // Add individual file progress bars if files exist and not queued
-                            if (!download.queued && download.files && download.files.length > 0) {
-                                const filesDiv = document.createElement('div');
-                                filesDiv.style.marginTop = '10px';
-                                filesDiv.innerHTML = '<strong>Individual Files:</strong>';
+                                `;
+                                item.appendChild(contentDiv);
                                 
-                                download.files.forEach(file => {
-                                    const fileDiv = document.createElement('div');
-                                    fileDiv.style.cssText = 'margin: 5px 0; padding: 5px; background: #333; border-radius: 3px;';
-                                    
-                                    const displayName = file.filename.split('/').pop().split(String.fromCharCode(92)).pop().replace(/^[a-f0-9]{32,}[._-]?/i, '');
-                                    
-                                    const nameDiv = document.createElement('div');
-                                    nameDiv.style.cssText = 'font-size: 12px; margin-bottom: 3px;';
-                                    nameDiv.textContent = displayName + ' (' + file.status + ')';
-                                    
-                                    const progressDiv = document.createElement('div');
-                                    progressDiv.className = 'progress-bar download-progress';
-                                    progressDiv.style.cssText = 'height: 15px; margin: 0;';
-                                    
-                                    const fillDiv = document.createElement('div');
-                                    fillDiv.className = 'progress-fill';
-                                    fillDiv.style.width = file.progress + '%';
-                                    
-                                    const textDiv = document.createElement('div');
-                                    textDiv.className = 'progress-text';
-                                    textDiv.style.cssText = 'line-height: 15px; font-size: 10px;';
-                                    textDiv.textContent = file.progress + '%';
-                                    
-                                    progressDiv.appendChild(fillDiv);
-                                    progressDiv.appendChild(textDiv);
-                                    fileDiv.appendChild(nameDiv);
-                                    fileDiv.appendChild(progressDiv);
-                                    filesDiv.appendChild(fileDiv);
-                                });
-                                
-                                contentDiv.appendChild(filesDiv);
-                            }
-                            
-                            downloadList.appendChild(item);
-                        });
+                                downloadList.appendChild(item);
+                            });
+                        }
                     });
                     
                     if (downloadList.innerHTML === '') {
@@ -994,14 +1370,107 @@ HTML_TEMPLATE = '''
                 .catch(err => console.error('loadStatus error:', err));
         }
 
-        function loadLogs() {
-            fetch('/api/logs')
+        let currentLogsPage = 1;
+        
+        function loadLogs(page = 1) {
+            const linesPerPage = document.getElementById('logs-per-page') ? document.getElementById('logs-per-page').value : 100;
+            currentLogsPage = page;
+            
+            fetch('/api/logs?page=' + page + '&lines=' + linesPerPage)
                 .then(r => r.json())
                 .then(data => {
-                    document.getElementById('log-content').innerHTML = data.logs.join('<br>');
+                    const logContent = document.getElementById('log-content');
+                    if (data.logs && data.logs.length > 0) {
+                        const logHtml = data.logs.map(log => {
+                            if (typeof log === 'string') {
+                                return '<div style="color: #ffffff; margin: 2px 0; font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.4;">' + log + '</div>';
+                            } else {
+                                return '<div style="color: ' + log.color + '; margin: 2px 0; font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.4;">' + log.text + '</div>';
+                            }
+                        }).join('');
+                        logContent.innerHTML = logHtml;
+                    } else {
+                        logContent.innerHTML = '<div style="color: #ff6b6b;">No logs available</div>';
+                    }
+                    
+                    if (data.pagination) {
+                        updateLogsPagination(data.pagination);
+                    }
+                    
+                    if (page === 1) {
+                        logContent.scrollTop = logContent.scrollHeight;
+                    } else {
+                        logContent.scrollTop = 0;
+                    }
                 })
-                .catch(err => console.error('loadLogs error:', err));
+                .catch(err => {
+                    console.error('loadLogs error:', err);
+                    document.getElementById('log-content').innerHTML = '<div style="color: #ff6b6b;">Error loading logs</div>';
+                });
         }
+        
+        function updateLogsPagination(pagination) {
+            const paginationDiv = document.getElementById('logs-pagination');
+            if (!paginationDiv) return;
+            
+            if (pagination.total_pages <= 1) {
+                paginationDiv.innerHTML = '';
+                return;
+            }
+            
+            let html = 'Page: ';
+            
+            // Previous link
+            if (pagination.has_prev) {
+                html += '<a href="#" onclick="loadLogs(' + (pagination.current_page - 1) + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">← Newer</a> ';
+            }
+            
+            // Page numbers
+            const startPage = Math.max(1, pagination.current_page - 3);
+            const endPage = Math.min(pagination.total_pages, pagination.current_page + 3);
+            
+            if (startPage > 1) {
+                html += '<a href="#" onclick="loadLogs(1); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">1</a>';
+                if (startPage > 2) {
+                    html += ' <span style="color: #666;">...</span> ';
+                }
+            }
+            
+            for (let i = startPage; i <= endPage; i++) {
+                if (i === pagination.current_page) {
+                    html += '<span style="color: #fff; font-weight: bold; margin: 0 3px;">' + i + '</span>';
+                } else {
+                    html += '<a href="#" onclick="loadLogs(' + i + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">' + i + '</a>';
+                }
+            }
+            
+            if (endPage < pagination.total_pages) {
+                if (endPage < pagination.total_pages - 1) {
+                    html += ' <span style="color: #666;">...</span> ';
+                }
+                html += '<a href="#" onclick="loadLogs(' + pagination.total_pages + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">' + pagination.total_pages + '</a>';
+            }
+            
+            // Next link
+            if (pagination.has_next) {
+                html += ' <a href="#" onclick="loadLogs(' + (pagination.current_page + 1) + '); return false;" style="color: #007acc; text-decoration: none; margin: 0 3px;">Older →</a>';
+            }
+            
+            // Add page info
+            const startLine = ((pagination.current_page - 1) * pagination.lines_per_page) + 1;
+            const endLine = Math.min(pagination.current_page * pagination.lines_per_page, pagination.total_lines);
+            html += ' <span style="color: #666; margin-left: 15px;">(Showing lines ' + startLine + '-' + endLine + ' of ' + pagination.total_lines + ')</span>';
+            
+            paginationDiv.innerHTML = html;
+        }
+        
+        // Add event listener for lines per page change
+        document.addEventListener('DOMContentLoaded', function() {
+            const linesSelect = document.getElementById('logs-per-page');
+            if (linesSelect) {
+                linesSelect.addEventListener('change', () => loadLogs(1));
+            }
+        });
 
         function abortDownload(client, filename) {
             if (confirm(`Are you sure you want to abort the download of "${filename}"?`)) {
@@ -1012,6 +1481,105 @@ HTML_TEMPLATE = '''
                         loadStatus();
                     });
             }
+        }
+
+        function submitManualMagnet(client) {
+            const input = document.getElementById(`magnet-input-${client}`);
+            const magnetLink = input.value.trim();
+            
+            if (!magnetLink) {
+                alert('Please enter a magnet link');
+                return;
+            }
+            
+            if (!magnetLink.startsWith('magnet:')) {
+                alert('Invalid magnet link format');
+                return;
+            }
+            
+            fetch('/api/manual-magnet', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_name: client,
+                    magnet_link: magnetLink
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert(data.message);
+                    input.value = ''; // Clear the input
+                    delete window.magnetInputValues[client]; // Clear preserved value
+                    loadStatus(); // Refresh the status
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(err => {
+                console.error('Manual magnet submission error:', err);
+                alert('Error submitting magnet link');
+            });
+        }
+
+        // Client order management
+        window.clientOrder = JSON.parse(localStorage.getItem('clientOrder')) || [];
+        
+        function moveClient(clientName, direction) {
+            console.log('moveClient called:', clientName, direction);
+            
+            // Get the current display order (not just the saved order)
+            const allClients = Object.keys(window.lastStatusData || {});
+            const currentOrder = window.clientOrder || [];
+            
+            console.log('Current state:', {
+                allClients,
+                savedOrder: currentOrder
+            });
+            
+            // Build the complete ordered list (same logic as in loadStatus)
+            const orderedClients = [...currentOrder.filter(c => allClients.includes(c))];
+            allClients.forEach(client => {
+                if (!orderedClients.includes(client)) {
+                    orderedClients.push(client);
+                }
+            });
+            
+            console.log('Ordered clients before move:', orderedClients);
+            
+            const currentIndex = orderedClients.indexOf(clientName);
+            if (currentIndex === -1) {
+                console.error('Client not found in ordered list:', clientName);
+                return;
+            }
+            
+            const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+            
+            console.log('Move from index', currentIndex, 'to', newIndex);
+            
+            if (newIndex >= 0 && newIndex < orderedClients.length) {
+                // Swap positions in the complete ordered list
+                [orderedClients[currentIndex], orderedClients[newIndex]] = [orderedClients[newIndex], orderedClients[currentIndex]];
+                
+                console.log('New order:', orderedClients);
+                
+                // Save the new complete order
+                window.clientOrder = orderedClients;
+                localStorage.setItem('clientOrder', JSON.stringify(orderedClients));
+                
+                // Refresh display
+                loadStatus();
+            } else {
+                console.log('Cannot move - index out of bounds');
+            }
+        }
+        
+        function resetClientOrder() {
+            window.clientOrder = [];
+            localStorage.removeItem('clientOrder');
+            loadStatus();
         }
 
         let currentHistoryPage = 1;
@@ -1223,10 +1791,148 @@ HTML_TEMPLATE = '''
             }
         }
 
+        function loadManualUpload() {
+            fetch('/api/config')
+                .then(r => r.json())
+                .then(config => {
+                    const manualUploadClients = document.getElementById('manual-upload-clients');
+                    manualUploadClients.innerHTML = '';
+                    
+                    const clients = config.download_clients || {};
+                    
+                    if (Object.keys(clients).length === 0) {
+                        manualUploadClients.innerHTML = '<div class="download-item">No download clients configured. Please configure clients in the Settings tab first.</div>';
+                        return;
+                    }
+                    
+                    // Get client order from localStorage (same as overview tab)
+                    const clientOrder = window.clientOrder || [];
+                    const allClients = Object.keys(clients);
+                    
+                    // Build ordered list (same logic as overview tab)
+                    const orderedClients = [...clientOrder.filter(c => allClients.includes(c))];
+                    allClients.forEach(client => {
+                        if (!orderedClients.includes(client)) {
+                            orderedClients.push(client);
+                        }
+                    });
+                    
+                    // Create upload sections in the same order as overview tab
+                    orderedClients.forEach(client => {
+                        const clientDiv = document.createElement('div');
+                        clientDiv.className = 'download-item';
+                        clientDiv.style.marginBottom = '20px';
+                        
+                        clientDiv.innerHTML = `
+                            <h3 style="margin: 0 0 15px 0; color: #fff;">${client.toUpperCase()}</h3>
+                            <div style="margin-bottom: 10px;">
+                                <label style="display: block; margin-bottom: 5px; color: #ccc; font-size: 14px;">Magnet Link or Info Hash:</label>
+                                <textarea id="manual-magnet-${client}" placeholder="Paste a magnet link or info hash (40 or 64 hex characters)..." 
+                                         style="width: 100%; height: 80px; padding: 10px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; font-size: 14px; resize: vertical; box-sizing: border-box;"></textarea>
+                            </div>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <button onclick="submitManualMagnetFromTab('${client}')" 
+                                        style="background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                                    Submit Magnet
+                                </button>
+                                <button onclick="clearManualMagnet('${client}')" 
+                                        style="background: #6c757d; color: white; border: none; padding: 10px 20px; border-radius: 3px; cursor: pointer; font-size: 14px;">
+                                    Clear
+                                </button>
+                                <div id="manual-status-${client}" style="color: #28a745; font-size: 14px; margin-left: 10px;"></div>
+                            </div>
+                            <div style="font-size: 12px; color: #999; margin-top: 10px;">
+                                You can also drop .torrent files directly into the magnets folder: <br>
+                                <code style="background: #333; padding: 2px 4px; border-radius: 2px;">${clients[client].magnets_folder}</code>
+                            </div>
+                        `;
+                        
+                        manualUploadClients.appendChild(clientDiv);
+                    });
+                })
+                .catch(err => {
+                    console.error('loadManualUpload error:', err);
+                    document.getElementById('manual-upload-clients').innerHTML = '<div class="download-item">Error loading manual upload interface</div>';
+                });
+        }
+
+        function submitManualMagnetFromTab(client) {
+            const textarea = document.getElementById(`manual-magnet-${client}`);
+            const statusDiv = document.getElementById(`manual-status-${client}`);
+            let magnetLink = textarea.value.trim();
+            
+            // Clear previous status
+            statusDiv.textContent = '';
+            
+            if (!magnetLink) {
+                statusDiv.textContent = 'Please enter a magnet link or hash';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+            
+            // Auto-prefix bare hashes (40-char hex for SHA1 or 64-char hex for SHA256)
+            if (/^[a-fA-F0-9]{40}$/.test(magnetLink) || /^[a-fA-F0-9]{64}$/.test(magnetLink)) {
+                magnetLink = 'magnet:?xt=urn:btih:' + magnetLink;
+            }
+            
+            if (!magnetLink.startsWith('magnet:')) {
+                statusDiv.textContent = 'Invalid format — paste a magnet link or a 40/64-character info hash';
+                statusDiv.style.color = '#dc3545';
+                return;
+            }
+            
+            statusDiv.textContent = 'Submitting...';
+            statusDiv.style.color = '#ffc107';
+            
+            fetch('/api/manual-magnet', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    client_name: client,
+                    magnet_link: magnetLink
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    statusDiv.textContent = 'Magnet submitted successfully!';
+                    statusDiv.style.color = '#28a745';
+                    textarea.value = ''; // Clear the textarea
+                    
+                    // Clear status after 3 seconds
+                    setTimeout(() => {
+                        statusDiv.textContent = '';
+                    }, 3000);
+                } else {
+                    statusDiv.textContent = 'Error: ' + data.message;
+                    statusDiv.style.color = '#dc3545';
+                }
+            })
+            .catch(err => {
+                console.error('Manual magnet submission error:', err);
+                statusDiv.textContent = 'Error submitting magnet link';
+                statusDiv.style.color = '#dc3545';
+            });
+        }
+
+        function clearManualMagnet(client) {
+            const textarea = document.getElementById(`manual-magnet-${client}`);
+            const statusDiv = document.getElementById(`manual-status-${client}`);
+            textarea.value = '';
+            statusDiv.textContent = '';
+        }
+
         function loadSettings() {
             fetch('/api/config')
                 .then(r => r.json())
                 .then(config => {
+                    window.originalLogSettings = {
+                        log_max_size_mb: config.log_max_size_mb || 1,
+                        log_backup_count: config.log_backup_count || 5
+                    };
+                    
                     const settingsContent = document.getElementById('settings-content');
                     settingsContent.innerHTML = '';
                     
@@ -1234,10 +1940,23 @@ HTML_TEMPLATE = '''
                     const apiGroup = document.createElement('div');
                     apiGroup.className = 'settings-group';
                     apiGroup.innerHTML = `
-                        <h3>Real-Debrid API Token</h3>
+                        <h3>Debrid Provider</h3>
                         <div class="form-row">
-                            <label>API Token:</label>
+                            <label>Provider:</label>
+                            <select id="debrid-provider" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;" onchange="toggleDebridProvider()">
+                                <option value="real_debrid" ${(config.debrid_provider || 'real_debrid') === 'real_debrid' ? 'selected' : ''}>Real-Debrid</option>
+                                <option value="torbox" ${config.debrid_provider === 'torbox' ? 'selected' : ''}>TorBox</option>
+                            </select>
+                        </div>
+                        <div id="rd-token-group" class="form-row" style="${config.debrid_provider === 'torbox' ? 'display:none' : ''}">
+                            <label>Real-Debrid API Token:</label>
                             <input type="password" id="api-token" value="${config.real_debrid_api_token || ''}">
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">Get your token from <a href="https://real-debrid.com/apitoken" target="_blank" style="color: #007acc;">real-debrid.com/apitoken</a></div>
+                        </div>
+                        <div id="torbox-token-group" class="form-row" style="${config.debrid_provider === 'torbox' ? '' : 'display:none'}">
+                            <label>TorBox API Key:</label>
+                            <input type="password" id="torbox-api-token" value="${config.torbox_api_token || ''}">
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">Get your API key from <a href="https://torbox.app/settings" target="_blank" style="color: #007acc;">torbox.app/settings</a></div>
                         </div>
                     `;
                     settingsContent.appendChild(apiGroup);
@@ -1281,8 +2000,45 @@ HTML_TEMPLATE = '''
                                 Higher modes download faster but may affect your computer's performance during active downloads.
                             </div>
                         </div>
+                        
+                        <div class="form-row">
+                            <label style="display: flex; align-items: center; cursor: pointer;">
+                                <input type="checkbox" id="auto-extract" ${config.auto_extract_archives !== false ? 'checked' : ''} 
+                                       style="margin-right: 8px; transform: scale(1.2);">
+                                Automatically extract compressed archives
+                            </label>
+                            <div style="font-size: 12px; color: #999; margin-top: 8px;">
+                                When enabled, downloaded ZIP, RAR, 7Z, and TAR files will be automatically extracted and the original archive will be removed. 
+                                Supports: .zip, .rar, .7z, .tar, .tar.gz, .tar.bz2, .tar.xz, .gz, .bz2, .xz
+                            </div>
+                        </div>
                     `;
                     settingsContent.appendChild(perfGroup);
+                    
+                    // Log settings section
+                    const logGroup = document.createElement('div');
+                    logGroup.className = 'settings-group';
+                    logGroup.innerHTML = '<h3>Log Settings</h3>' +
+                        '<div class="form-row">' +
+                            '<label>Log File Size Limit (MB):</label>' +
+                            '<input type="number" id="log-max-size-mb" value="' + (config.log_max_size_mb || 1) + '" min="1" max="100" ' +
+                                   'style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;">' +
+                            '<div style="font-size: 12px; color: #999; margin-top: 8px;">' +
+                                'Maximum size for each log file before rotation (1-100 MB). When exceeded, a new log file is created.' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="form-row">' +
+                            '<label>Number of Backup Log Files:</label>' +
+                            '<input type="number" id="log-backup-count" value="' + (config.log_backup_count || 5) + '" min="1" max="20"' +
+                                   ' style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; font-size: 14px;">' +
+                            '<div style="font-size: 12px; color: #999; margin-top: 8px;">' +
+                                'Number of old log files to keep (1-20). Total disk space = Size Limit × (Backup Count + 1).' +
+                            '</div>' +
+                        '</div>' +
+                        '<div style="font-size: 12px; color: #ccc; margin-top: 10px; padding: 10px; background: #2a2a2a; border-radius: 3px;">' +
+                            '<strong>Note:</strong> Log settings require an application restart to take effect. Current settings: ' + (config.log_max_size_mb || 1) + 'MB per file, ' + (config.log_backup_count || 5) + ' backup files.' +
+                        '</div>';
+                    settingsContent.appendChild(logGroup);
                     
                     // Download clients section
                     const clientsGroup = document.createElement('div');
@@ -1299,24 +2055,9 @@ HTML_TEMPLATE = '''
                         clientDiv.className = 'settings-group';
                         clientDiv.style.background = '#3d3d3d';
                         
-                        const selectedTypes = clientConfig.file_types || ['video'];
-                        let fileTypeOptions = '';
-                        Object.keys(fileCategories).forEach(category => {
-                            const extensions = fileCategories[category].join(', ');
-                            const selected = selectedTypes.includes(category) ? 'selected' : '';
-                            fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
-                        });
-                        
                         clientDiv.innerHTML = `
                             <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
                             <h4>${name.toUpperCase()}</h4>
-                            <div class="form-row">
-                                <label>File Types to Download:</label>
-                                <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
-                                    ${fileTypeOptions}
-                                </select>
-                                <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
-                            </div>
                             <div class="form-row">
                                 <label>Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${clientConfig.magnets_folder}">
@@ -1337,15 +2078,37 @@ HTML_TEMPLATE = '''
                                 <label>Failed Magnets Folder:</label>
                                 <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${clientConfig.failed_magnets_folder || ''}">
                             </div>
+                            ${(name.toLowerCase() !== 'sonarr' && name.toLowerCase() !== 'radarr') ? `
                             <div class="form-row">
-                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
-                                <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="${clientConfig.arr_url || ''}" placeholder="http://localhost:8989 or http://localhost:7878">
+                                <label>Audiobook Library Folder:</label>
+                                <input type="text" class="client-field" data-client="${name}" data-field="audiobook_library_folder" value="${clientConfig.audiobook_library_folder || ''}" placeholder="Optional - leave blank to disable">
                             </div>
-                            <div class="form-row">
-                                <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
-                                <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="${clientConfig.arr_api_key || ''}" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
-                                <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
+                            <div style="font-size: 12px; color: #999; margin: -5px 0 10px 0;">
+                                When set, finished downloads are sorted into "Author - Title" folders (audio files only, using embedded tags) and moved here. Anything that can't be identified is left in Completed Downloads.
                             </div>
+                            ` : ''}
+                            ${(name.toLowerCase() === 'sonarr' || name.toLowerCase() === 'radarr') ? `
+                            <div style="border-top: 1px solid #555; margin: 15px 0; padding-top: 15px;">
+                                <h5 style="margin: 0 0 10px 0; color: #007acc;">ARR Integration (Optional)</h5>
+                                <div class="form-row">
+                                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key:</label>
+                                    <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" value="${clientConfig.arr_api_key || ''}" placeholder="Enter API key to enable automatic failure reporting">
+                                </div>
+                                <div class="form-row">
+                                    <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL:</label>
+                                    <input type="text" class="client-field" data-client="${name}" data-field="arr_url" value="${clientConfig.arr_url || 'http://localhost:' + (name.toLowerCase() === 'sonarr' ? '8989' : '7878')}" placeholder="http://localhost:${name.toLowerCase() === 'sonarr' ? '8989' : '7878'}">
+                                </div>
+                                <div class="form-row">
+                                    <button onclick="testArrConnection('${name}')" style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 3px; cursor: pointer; font-size: 14px; margin-right: 10px;">
+                                        Test ${name.charAt(0).toUpperCase() + name.slice(1)} Connection
+                                    </button>
+                                    <span id="arr-test-result-${name}" style="font-size: 14px; margin-left: 10px;"></span>
+                                </div>
+                                <div style="font-size: 12px; color: #999; margin-top: 8px;">
+                                    When enabled, Debridarr will automatically mark failed magnets as failed in ${name.charAt(0).toUpperCase() + name.slice(1)} for errors like 404, infringing content, timeouts, and security issues.
+                                </div>
+                            </div>
+                            ` : ''}
                         `;
                         clientsDiv.appendChild(clientDiv);
                     });
@@ -1372,11 +2135,16 @@ HTML_TEMPLATE = '''
 
         function saveSettings() {
             const config = {
+                debrid_provider: document.getElementById('debrid-provider').value,
                 real_debrid_api_token: document.getElementById('api-token').value,
+                torbox_api_token: document.getElementById('torbox-api-token').value,
                 manual_downloads_folder: document.getElementById('manual-downloads-folder').value,
                 media_root_directory: document.getElementById('media-root-directory').value,
                 debrid_sync_limit: parseInt(document.getElementById('debrid-sync-limit').value) || 100,
                 performance_mode: document.getElementById('performance-mode').value,
+                auto_extract_archives: document.getElementById('auto-extract').checked,
+                log_max_size_mb: parseInt(document.getElementById('log-max-size-mb').value) || 1,
+                log_backup_count: parseInt(document.getElementById('log-backup-count').value) || 5,
                 download_clients: {}
             };
             
@@ -1386,12 +2154,7 @@ HTML_TEMPLATE = '''
                 if (!config.download_clients[client]) {
                     config.download_clients[client] = {};
                 }
-                if (field === 'file_types') {
-                    const selected = Array.from(input.selectedOptions).map(opt => opt.value);
-                    config.download_clients[client][field] = selected.length > 0 ? selected : ['video'];
-                } else {
-                    config.download_clients[client][field] = input.value;
-                }
+                config.download_clients[client][field] = input.value;
             });
             
             fetch('/api/config', {
@@ -1413,6 +2176,58 @@ HTML_TEMPLATE = '''
                 });
         }
 
+        function testArrConnection(clientName) {
+            const apiKeyField = document.querySelector(`[data-client="${clientName}"][data-field="arr_api_key"]`);
+            const urlField = document.querySelector(`[data-client="${clientName}"][data-field="arr_url"]`);
+            const resultSpan = document.getElementById(`arr-test-result-${clientName}`);
+            
+            if (!apiKeyField || !urlField || !resultSpan) {
+                alert('Error: Could not find connection fields');
+                return;
+            }
+            
+            const apiKey = apiKeyField.value.trim();
+            const baseUrl = urlField.value.trim();
+            
+            if (!apiKey || !baseUrl) {
+                resultSpan.innerHTML = '<span style="color: #ff6b6b;">Please enter both API key and URL</span>';
+                return;
+            }
+            
+            // Show testing status
+            resultSpan.innerHTML = '<span style="color: #ffd93d;">Testing connection...</span>';
+            
+            fetch('/api/test-arr-connection', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    app_type: clientName.toLowerCase(),
+                    base_url: baseUrl,
+                    api_key: apiKey
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    resultSpan.innerHTML = `<span style="color: #6bcf7f;">✓ ${data.message}</span>`;
+                } else {
+                    resultSpan.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.message}</span>`;
+                }
+            })
+            .catch(err => {
+                console.error('Test connection error:', err);
+                resultSpan.innerHTML = '<span style="color: #ff6b6b;">✗ Test failed - network error</span>';
+            });
+        }
+
+        function toggleDebridProvider() {
+            const provider = document.getElementById('debrid-provider').value;
+            document.getElementById('rd-token-group').style.display = provider === 'real_debrid' ? '' : 'none';
+            document.getElementById('torbox-token-group').style.display = provider === 'torbox' ? '' : 'none';
+        }
+
         function addNewClient() {
             const name = prompt('Enter client name (e.g., lidarr, readarr):');
             if (!name) return;
@@ -1420,14 +2235,6 @@ HTML_TEMPLATE = '''
             fetch('/api/config')
                 .then(r => r.json())
                 .then(config => {
-                    const fileCategories = config.file_categories || {};
-                    let fileTypeOptions = '';
-                    Object.keys(fileCategories).forEach(category => {
-                        const extensions = fileCategories[category].join(', ');
-                        const selected = category === 'video' ? 'selected' : '';
-                        fileTypeOptions += `<option value="${category}" ${selected}>${category.charAt(0).toUpperCase() + category.slice(1)} (${extensions})</option>`;
-                    });
-                    
                     const baseDir = 'C:/ProgramData/Debridarr/' + name.toLowerCase();
                     
                     const clientsDiv = document.getElementById('clients-list');
@@ -1437,13 +2244,6 @@ HTML_TEMPLATE = '''
                     clientDiv.innerHTML = `
                         <button class="remove-client-btn" onclick="removeClient('${name}')">Remove</button>
                         <h4>${name.toUpperCase()}</h4>
-                        <div class="form-row">
-                            <label>File Types to Download:</label>
-                            <select multiple class="client-field" data-client="${name}" data-field="file_types" id="file-types-${name}" style="padding: 8px; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; color: #fff; width: 100%; height: 100px; font-size: 14px;">
-                                ${fileTypeOptions}
-                            </select>
-                            <div style="font-size: 12px; color: #999; margin-top: 5px;">Hold Ctrl/Cmd to select multiple types</div>
-                        </div>
                         <div class="form-row">
                             <label>Magnets Folder:</label>
                             <input type="text" class="client-field" data-client="${name}" data-field="magnets_folder" value="${baseDir}/magnets">
@@ -1463,15 +2263,6 @@ HTML_TEMPLATE = '''
                         <div class="form-row">
                             <label>Failed Magnets Folder:</label>
                             <input type="text" class="client-field" data-client="${name}" data-field="failed_magnets_folder" value="${baseDir}/failed_magnets">
-                        </div>
-                        <div class="form-row">
-                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} URL (Optional - for failure reporting):</label>
-                            <input type="text" class="client-field" data-client="${name}" data-field="arr_url" id="arr-url-${name}" value="" placeholder="http://localhost:8989 or http://localhost:7878">
-                        </div>
-                        <div class="form-row">
-                            <label>${name.charAt(0).toUpperCase() + name.slice(1)} API Key (Optional):</label>
-                            <input type="password" class="client-field" data-client="${name}" data-field="arr_api_key" id="arr-key-${name}" value="" placeholder="API key from ${name.charAt(0).toUpperCase() + name.slice(1)} settings">
-                            <button class="retry-btn" onclick="testArrConnection('${name}')" style="margin-top: 5px;">Test Connection</button>
                         </div>
                     `;
                     clientsDiv.appendChild(clientDiv);
@@ -1496,32 +2287,9 @@ HTML_TEMPLATE = '''
                 .catch(err => console.error('moveQueue error:', err));
         }
         
-        function testArrConnection(clientName) {
-            const url = document.getElementById(`arr-url-${clientName}`).value;
-            const apiKey = document.getElementById(`arr-key-${clientName}`).value;
-            
-            if (!url || !apiKey) {
-                alert('Please enter both URL and API key');
-                return;
-            }
-            
-            fetch('/api/test-arr', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({url: url, api_key: apiKey})
-            })
-                .then(r => r.json())
-                .then(data => {
-                    alert(data.message);
-                })
-                .catch(err => {
-                    console.error('Test connection error:', err);
-                    alert('Test failed: ' + err);
-                });
-        }
-
+        
         function syncDebridDownloads() {
-            if (!confirm('Sync Real-Debrid download history? This will fetch all downloads from your Real-Debrid account.')) return;
+            if (!confirm('Sync debrid download history? This will fetch all downloads from your debrid account.')) return;
             
             fetch('/api/debrid-downloads/sync', {method: 'POST'})
                 .then(r => r.json())
@@ -1603,7 +2371,7 @@ HTML_TEMPLATE = '''
                             debridList.appendChild(item);
                         });
                     } else {
-                        debridList.innerHTML = '<div class="download-item">No downloads found. Click "Sync Debrid Downloads" to fetch from Real-Debrid.</div>';
+                        debridList.innerHTML = '<div class="download-item">No downloads found. Click "Sync Debrid Downloads" to fetch from your debrid account.</div>';
                     }
                     
                     // Pagination controls
@@ -1692,7 +2460,7 @@ HTML_TEMPLATE = '''
         document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
         document.getElementById(savedTab).classList.add('active');
         const navItems = document.querySelectorAll('.nav-item');
-        const sections = ['overview', 'downloads', 'history', 'failed', 'debrid-downloads', 'completed', 'logs', 'settings'];
+        const sections = ['overview', 'downloads', 'manual-upload', 'history', 'failed', 'debrid-downloads', 'completed', 'logs', 'settings'];
         const index = sections.indexOf(savedTab);
         if (index >= 0) navItems[index].classList.add('active');
         
@@ -1702,9 +2470,38 @@ HTML_TEMPLATE = '''
         if (savedTab === 'debrid-downloads') loadDebridDownloads();
         if (savedTab === 'completed') loadCompleted();
         if (savedTab === 'settings') loadSettings();
+        if (savedTab === 'manual-upload') loadManualUpload();
         
-        // Auto-refresh status every 5 seconds
-        setInterval(loadStatus, 5000);
+        // Global variable to preserve input values
+        window.magnetInputValues = {};
+        
+        // Function to preserve input values
+        function preserveMagnetInputs() {
+            const inputs = document.querySelectorAll('[id^="magnet-input-"]');
+            inputs.forEach(input => {
+                const client = input.id.replace('magnet-input-', '');
+                if (input.value.trim()) {
+                    window.magnetInputValues[client] = input.value;
+                }
+            });
+        }
+        
+        // Function to restore input values
+        function restoreMagnetInputs() {
+            Object.keys(window.magnetInputValues).forEach(client => {
+                const input = document.getElementById(`magnet-input-${client}`);
+                if (input && window.magnetInputValues[client]) {
+                    input.value = window.magnetInputValues[client];
+                }
+            });
+        }
+        
+        // Auto-refresh status every 2 seconds for better progress bar updates
+        setInterval(() => {
+            preserveMagnetInputs();
+            loadStatus();
+            setTimeout(restoreMagnetInputs, 100); // Small delay to ensure DOM is updated
+        }, 2000);
         // Health check every 10 minutes
         healthCheckInterval = setInterval(loadHealth, 600000);
         // Initial loads with retry for server startup

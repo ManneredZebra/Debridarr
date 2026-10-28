@@ -7,6 +7,7 @@ A lightweight Windows application that monitors folders for magnet links from So
 - Web-based UI for monitoring and management
 - Monitors folders for `.magnet` files from Sonarr, Radarr, and other clients
 - Automatically processes magnet links through Real Debrid API
+- Downloads all files from magnet links regardless of file type
 - Real-time download progress tracking with individual file progress
 - Downloads completed files to configured folders
 - Cleans up torrents from Real Debrid after download
